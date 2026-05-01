@@ -522,6 +522,25 @@ impl StudyGraphStorage {
         })
     }
 
+    pub fn restore_app_backup(&mut self, backup: &AppBackup) -> StorageResult<()> {
+        self.save_workspace(&backup.workspace)?;
+        self.save_app_settings(backup.workspace.id, &backup.settings)?;
+
+        self.conn.execute(
+            "DELETE FROM doc_pages WHERE workspace_id = ?1",
+            params![backup.workspace.id.to_string()],
+        )?;
+        for (position, page) in backup.doc_pages.iter().enumerate() {
+            self.save_doc_page(page, position as i64)?;
+        }
+
+        for event in &backup.review_events {
+            self.append_review_event(event)?;
+        }
+
+        Ok(())
+    }
+
     pub fn load_doc_pages(&self, workspace_id: Uuid) -> StorageResult<Vec<DocPage>> {
         let mut stmt = self.conn.prepare(
             "
@@ -1486,6 +1505,60 @@ mod tests {
         assert_eq!(backup.settings.default_deck, "CPU");
         assert_eq!(backup.doc_pages.len(), 1);
         assert_eq!(backup.doc_pages[0].title, "CPU Docs");
+    }
+
+    #[test]
+    fn restores_complete_app_backup() {
+        let page = import_single_markdown_page(
+            "CPU",
+            "- What does the ALU do? #card
+  sgd-deck:: CPU
+  sgd-topic:: Execution Units
+  - It performs arithmetic and logical operations.",
+        );
+        let workspace = Workspace {
+            id: Uuid::new_v4(),
+            name: "Backup".to_string(),
+            pages: vec![page],
+        };
+        let mut source = StudyGraphStorage::in_memory().unwrap();
+        source.save_workspace(&workspace).unwrap();
+        source
+            .save_app_settings(
+                workspace.id,
+                &AppSettings {
+                    default_deck: "CPU".to_string(),
+                    default_topic: "Execution Units".to_string(),
+                    ..AppSettings::default()
+                },
+            )
+            .unwrap();
+        source.create_doc_page(workspace.id, "CPU Docs").unwrap();
+
+        let card = source.load_cards(workspace.id).unwrap().remove(0);
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let next = schedule_review(&card.srs, Rating::Good, now, SchedulerSettings::default());
+        source
+            .append_review_event(&ReviewEvent {
+                id: Uuid::new_v4(),
+                card_id: card.id,
+                rating: Rating::Good,
+                reviewed_at: now,
+                previous_srs: card.srs,
+                next_srs: next,
+            })
+            .unwrap();
+        let backup = source.export_app_backup(workspace.id).unwrap();
+
+        let mut target = StudyGraphStorage::in_memory().unwrap();
+        target.restore_app_backup(&backup).unwrap();
+        let restored = target.export_app_backup(workspace.id).unwrap();
+
+        assert_eq!(restored.workspace.name, "Backup");
+        assert_eq!(restored.cards.len(), 1);
+        assert_eq!(restored.review_events.len(), 1);
+        assert_eq!(restored.settings.default_deck, "CPU");
+        assert_eq!(restored.doc_pages[0].title, "CPU Docs");
     }
 
     #[test]

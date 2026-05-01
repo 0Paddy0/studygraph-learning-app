@@ -73,6 +73,12 @@ struct BackupExportResult {
 }
 
 #[derive(Debug, Serialize)]
+struct BackupRestoreResult {
+    file_path: String,
+    snapshot: DesktopSnapshot,
+}
+
+#[derive(Debug, Serialize)]
 struct FolderImportResult {
     folder_path: String,
     imported_files: Vec<String>,
@@ -856,6 +862,39 @@ fn export_app_backup_to_folder(
     })
 }
 
+#[tauri::command]
+fn restore_app_backup_from_file(
+    file_path: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<BackupRestoreResult, String> {
+    let json = std::fs::read_to_string(&file_path)
+        .map_err(|error| format!("Could not read backup file: {error}"))?;
+    let backup: AppBackup = serde_json::from_str(&json)
+        .map_err(|error| format!("Invalid StudyGraph backup JSON: {error}"))?;
+    if backup.schema_version != 1 {
+        return Err(format!(
+            "Unsupported backup schema version: {}",
+            backup.schema_version
+        ));
+    }
+
+    {
+        let mut storage = lock_storage(&state)?;
+        storage
+            .restore_app_backup(&backup)
+            .map_err(format_storage_error)?;
+    }
+    *state
+        .workspace_id
+        .lock()
+        .map_err(|_| "Workspace state lock poisoned".to_string())? = Some(backup.workspace.id);
+
+    Ok(BackupRestoreResult {
+        file_path,
+        snapshot: snapshot_for_workspace(&state, backup.workspace.id)?,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
@@ -904,7 +943,8 @@ fn main() {
             export_workspace_markdown,
             export_workspace_markdown_to_folder,
             export_app_backup,
-            export_app_backup_to_folder
+            export_app_backup_to_folder,
+            restore_app_backup_from_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running StudyGraph desktop app");

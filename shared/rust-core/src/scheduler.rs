@@ -108,7 +108,7 @@ pub fn schedule_review(
 }
 
 pub fn is_due(card: &StudyCard, now: DateTime<Utc>) -> bool {
-    card.srs.due_at.map_or(true, |due_at| due_at <= now)
+    card.srs.due_at.is_none_or(|due_at| due_at <= now)
 }
 
 pub fn is_new(card: &StudyCard) -> bool {

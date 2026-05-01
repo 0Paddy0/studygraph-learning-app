@@ -185,6 +185,11 @@ export interface BackupExportResult {
   backup: AppBackup;
 }
 
+export interface BackupRestoreResult {
+  file_path: string;
+  snapshot: DesktopSnapshot;
+}
+
 export interface FolderImportResult {
   folder_path: string;
   imported_files: string[];

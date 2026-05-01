@@ -5,6 +5,7 @@ import type {
   AppDebugInfo,
   AppSettings,
   BackupExportResult,
+  BackupRestoreResult,
   DesktopSnapshot,
   DocBlockKind,
   DocPage,
@@ -200,4 +201,17 @@ export async function exportAppBackup(): Promise<AppBackup> {
 
 export async function exportAppBackupToFolder(folderPath: string): Promise<BackupExportResult> {
   return invoke<BackupExportResult>("export_app_backup_to_folder", { folderPath });
+}
+
+export async function pickBackupFile(): Promise<string | null> {
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "StudyGraph Backup", extensions: ["json"] }],
+  });
+  return Array.isArray(selected) ? selected[0] ?? null : selected;
+}
+
+export async function restoreAppBackupFromFile(filePath: string): Promise<BackupRestoreResult> {
+  return invoke<BackupRestoreResult>("restore_app_backup_from_file", { filePath });
 }

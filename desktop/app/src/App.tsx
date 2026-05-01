@@ -25,10 +25,12 @@ import {
   loadSnapshot,
   moveDocBlock,
   outdentBlock,
+  pickBackupFile,
   pickExportFolder,
   pickMarkdownFile,
   pickMarkdownFolder,
   renamePage,
+  restoreAppBackupFromFile,
   removeBlockProperty,
   removePageProperty,
   reviewCard,
@@ -641,6 +643,28 @@ export function App() {
     }
   }
 
+  async function restoreBackupFromFile() {
+    setError(null);
+    setFileStatus(null);
+    try {
+      const filePath = await pickBackupFile();
+      if (!filePath) return;
+      const confirmed = window.confirm(
+        "Restore this StudyGraph backup? This replaces the current workspace data with the backup contents.",
+      );
+      if (!confirmed) return;
+      const result = await restoreAppBackupFromFile(filePath);
+      setSnapshot(result.snapshot);
+      setSelectedPageId(result.snapshot.workspace.pages[0]?.id ?? null);
+      setFocusedBlockId(null);
+      setBackupPreview(null);
+      setFileStatus(`Restored backup from ${result.file_path}`);
+      setScreen("export");
+    } catch (restoreError) {
+      setError(restoreError instanceof Error ? restoreError.message : String(restoreError));
+    }
+  }
+
   function generateCardsPreview() {
     setError(null);
     const cards = mockGenerateCards(generatorInput);
@@ -1164,6 +1188,7 @@ export function App() {
             onExportFolder={() => void exportToFolder()}
             onRefreshBackup={() => void loadBackupPreview()}
             onExportBackup={() => void exportBackupToFolder()}
+            onRestoreBackup={() => void restoreBackupFromFile()}
           />
         )}
       </main>
@@ -2882,6 +2907,7 @@ function ExportView({
   onExportFolder,
   onRefreshBackup,
   onExportBackup,
+  onRestoreBackup,
 }: {
   pages: WorkspaceExport["pages"];
   backup: AppBackup | null;
@@ -2890,6 +2916,7 @@ function ExportView({
   onExportFolder: () => void;
   onRefreshBackup: () => void;
   onExportBackup: () => void;
+  onRestoreBackup: () => void;
 }) {
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const allMarkdown = useMemo(
@@ -2920,6 +2947,7 @@ function ExportView({
       <div className="export-actions">
         <button onClick={onRefreshBackup}>Refresh JSON Backup</button>
         <button className="primary" onClick={onExportBackup}>Export JSON Backup</button>
+        <button onClick={onRestoreBackup}>Restore JSON Backup</button>
         <button className="primary" onClick={() => void copyText(backupJson)} disabled={!backupJson}>
           Copy JSON Backup
         </button>
