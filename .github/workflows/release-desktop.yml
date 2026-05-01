@@ -1,0 +1,95 @@
+name: Desktop Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version/tag, e.g. v0.1.0"
+        required: true
+        default: "v0.1.0"
+      prerelease:
+        description: "Mark release as prerelease"
+        required: true
+        default: "true"
+        type: choice
+        options: ["true", "false"]
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} desktop bundle
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: windows
+            os: windows-latest
+          - platform: linux
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: desktop/app/package-lock.json
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux Tauri dependencies
+        if: matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - name: Install frontend dependencies
+        working-directory: desktop/app
+        run: npm ci
+
+      - name: Build Tauri bundle
+        working-directory: desktop/app
+        run: npm run tauri:build
+
+      - name: Collect Windows artifacts
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force release-artifacts/windows | Out-Null
+          Get-ChildItem -Recurse desktop/app/src-tauri/target/release/bundle -File |
+            Where-Object { $_.Extension -in '.msi','.exe' } |
+            Copy-Item -Destination release-artifacts/windows
+
+      - name: Collect Linux artifacts
+        if: matrix.platform == 'linux'
+        shell: bash
+        run: |
+          mkdir -p release-artifacts/linux
+          find desktop/app/src-tauri/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} release-artifacts/linux/ \;
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: studygraph-${{ matrix.platform }}-${{ github.event.inputs.version }}
+          path: release-artifacts/${{ matrix.platform }}/*
+          if-no-files-found: error
+
+  publish:
+    name: Publish GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.version }}
+          name: StudyGraph ${{ github.event.inputs.version }}
+          prerelease: ${{ github.event.inputs.prerelease == 'true' }}
+          files: release-artifacts/*
+          generate_release_notes: true
