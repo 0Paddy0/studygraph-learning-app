@@ -1245,7 +1245,7 @@ function NotesView({
   onOutdent: (blockId: string) => void;
   onSetProperty: (blockId: string, key: string, value: string) => void;
   onRemoveProperty: (blockId: string, key: string) => void;
-  onDeleteBlock: (blockId: string) => void;
+  onDeleteBlock: (blockId: string) => MaybePromise;
   onCreateCard: (block: Block) => void;
   backlinks: BacklinkReference[];
   onOpenPage: (pageId: string) => void;
@@ -1371,7 +1371,7 @@ function DocView({
   onAddBlock: (pageId: string, kind: DocBlockKind) => void;
   onAddSectionTemplate: (pageId: string) => void;
   onUpdateBlock: (block: DocBlock) => void;
-  onDeleteBlock: (blockId: string) => void;
+  onDeleteBlock: (blockId: string) => MaybePromise;
   onMoveBlock: (blockId: string, direction: number) => void;
   onCreateCard: (docPage: DocPage, block: DocBlock) => void;
 }) {
@@ -1837,6 +1837,10 @@ function BlockView({
               } else {
                 onIndent(block.id);
               }
+            }
+            if (event.key === "Backspace" && draft.trim() === "" && block.children.length === 0) {
+              event.preventDefault();
+              void onDeleteBlock(block.id);
             }
             if (event.key === "ArrowUp") {
               event.preventDefault();

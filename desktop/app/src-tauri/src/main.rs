@@ -865,6 +865,7 @@ fn export_app_backup_to_folder(
 #[tauri::command]
 fn restore_app_backup_from_file(
     file_path: String,
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppState>,
 ) -> Result<BackupRestoreResult, String> {
     let json = std::fs::read_to_string(&file_path)
@@ -879,6 +880,30 @@ fn restore_app_backup_from_file(
     }
 
     {
+        let current_workspace_id = ensure_workspace(&state)?;
+        let backup_dir = app
+            .path()
+            .app_data_dir()
+            .map_err(|error| format!("Could not resolve app data dir: {error}"))?
+            .join("safety-backups");
+        std::fs::create_dir_all(&backup_dir)
+            .map_err(|error| format!("Could not create safety backup folder: {error}"))?;
+
+        let safety_backup = {
+            let storage = lock_storage(&state)?;
+            storage
+                .export_app_backup(current_workspace_id)
+                .map_err(format_storage_error)?
+        };
+        let safety_path = backup_dir.join(format!(
+            "before-restore-{}.json",
+            Utc::now().format("%Y%m%d-%H%M%S")
+        ));
+        let safety_json = serde_json::to_string_pretty(&safety_backup)
+            .map_err(|error| format!("Could not serialize safety backup: {error}"))?;
+        std::fs::write(&safety_path, safety_json)
+            .map_err(|error| format!("Could not write safety backup: {error}"))?;
+
         let mut storage = lock_storage(&state)?;
         storage
             .restore_app_backup(&backup)
