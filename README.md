@@ -58,6 +58,28 @@ npm run build
 npm run tauri -- build --debug
 ```
 
+## Windows Build Helper
+
+From `native-studygraph-app`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-exe.ps1
+```
+
+This creates a release Tauri build and copies the generated `.exe`/installer artifacts to:
+
+```text
+native-studygraph-app/release-artifacts/windows/release/
+```
+
+For a faster debug build:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\build-windows-exe.ps1 -Profile debug
+```
+
+The `release-artifacts/`, `target/`, `node_modules/`, and `dist/` folders are intentionally ignored by Git.
+
 The latest Windows debug artifacts are written under:
 
 ```text
