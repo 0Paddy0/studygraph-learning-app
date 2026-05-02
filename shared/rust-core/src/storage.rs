@@ -233,13 +233,22 @@ impl StudyGraphStorage {
         }
         drop(stmt);
         if !names.iter().any(|name| name == "tags_json") {
-            self.conn.execute("ALTER TABLE doc_pages ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'", [])?;
+            self.conn.execute(
+                "ALTER TABLE doc_pages ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+                [],
+            )?;
         }
         if !names.iter().any(|name| name == "source") {
-            self.conn.execute("ALTER TABLE doc_pages ADD COLUMN source TEXT NOT NULL DEFAULT ''", [])?;
+            self.conn.execute(
+                "ALTER TABLE doc_pages ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+                [],
+            )?;
         }
         if !names.iter().any(|name| name == "language") {
-            self.conn.execute("ALTER TABLE doc_pages ADD COLUMN language TEXT NOT NULL DEFAULT 'auto'", [])?;
+            self.conn.execute(
+                "ALTER TABLE doc_pages ADD COLUMN language TEXT NOT NULL DEFAULT 'auto'",
+                [],
+            )?;
         }
         Ok(())
     }

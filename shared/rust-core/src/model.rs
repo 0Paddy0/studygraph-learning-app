@@ -198,7 +198,8 @@ impl AppSettings {
             _ => "none".to_string(),
         };
         self.open_ai_account_email = self.open_ai_account_email.trim().to_string();
-        self.open_ai_account_status = normalize_inline(&self.open_ai_account_status, "not-connected");
+        self.open_ai_account_status =
+            normalize_inline(&self.open_ai_account_status, "not-connected");
         self.open_ai_api_key_last_four = self
             .open_ai_api_key_last_four
             .chars()
