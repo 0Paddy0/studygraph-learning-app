@@ -101,6 +101,15 @@ struct UpdateDocBlockInput {
     checked: bool,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateDocPageMetadataInput {
+    page_id: String,
+    tags: Vec<String>,
+    source: String,
+    language: String,
+}
+
 #[tauri::command]
 fn load_snapshot(state: tauri::State<'_, AppState>) -> Result<DesktopSnapshot, String> {
     let workspace_id = ensure_workspace(&state)?;
@@ -188,6 +197,22 @@ fn update_doc_page_title(
     let storage = lock_storage(&state)?;
     storage
         .update_doc_page_title(page_uuid, &title)
+        .map_err(format_storage_error)?;
+    storage
+        .load_doc_pages(workspace_id)
+        .map_err(format_storage_error)
+}
+
+#[tauri::command]
+fn update_doc_page_metadata(
+    input: UpdateDocPageMetadataInput,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<DocPage>, String> {
+    let workspace_id = ensure_workspace(&state)?;
+    let page_uuid = Uuid::parse_str(&input.page_id).map_err(|error| error.to_string())?;
+    let storage = lock_storage(&state)?;
+    storage
+        .update_doc_page_metadata(page_uuid, input.tags, &input.source, &input.language)
         .map_err(format_storage_error)?;
     storage
         .load_doc_pages(workspace_id)
@@ -941,6 +966,7 @@ fn main() {
             load_doc_pages,
             create_doc_page,
             update_doc_page_title,
+            update_doc_page_metadata,
             delete_doc_page,
             add_doc_block,
             update_doc_block,

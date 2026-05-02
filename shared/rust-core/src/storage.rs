@@ -189,6 +189,9 @@ impl StudyGraphStorage {
                 workspace_id TEXT NOT NULL,
                 title TEXT NOT NULL,
                 icon TEXT NOT NULL,
+                tags_json TEXT NOT NULL DEFAULT '[]',
+                source TEXT NOT NULL DEFAULT '',
+                language TEXT NOT NULL DEFAULT 'auto',
                 position INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL,
@@ -217,6 +220,27 @@ impl StudyGraphStorage {
             );
             ",
         )?;
+        self.ensure_doc_page_metadata_columns()?;
+        Ok(())
+    }
+
+    fn ensure_doc_page_metadata_columns(&self) -> StorageResult<()> {
+        let mut stmt = self.conn.prepare("PRAGMA table_info(doc_pages)")?;
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut names = Vec::new();
+        for column in columns {
+            names.push(column?);
+        }
+        drop(stmt);
+        if !names.iter().any(|name| name == "tags_json") {
+            self.conn.execute("ALTER TABLE doc_pages ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'", [])?;
+        }
+        if !names.iter().any(|name| name == "source") {
+            self.conn.execute("ALTER TABLE doc_pages ADD COLUMN source TEXT NOT NULL DEFAULT ''", [])?;
+        }
+        if !names.iter().any(|name| name == "language") {
+            self.conn.execute("ALTER TABLE doc_pages ADD COLUMN language TEXT NOT NULL DEFAULT 'auto'", [])?;
+        }
         Ok(())
     }
 
@@ -544,7 +568,7 @@ impl StudyGraphStorage {
     pub fn load_doc_pages(&self, workspace_id: Uuid) -> StorageResult<Vec<DocPage>> {
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, title, icon, created_at, updated_at
+            SELECT id, title, icon, tags_json, source, language, created_at, updated_at
             FROM doc_pages
             WHERE workspace_id = ?1
             ORDER BY position ASC, updated_at DESC
@@ -555,8 +579,11 @@ impl StudyGraphStorage {
                 id: row.get(0)?,
                 title: row.get(1)?,
                 icon: row.get(2)?,
-                created_at: row.get(3)?,
-                updated_at: row.get(4)?,
+                tags_json: row.get(3)?,
+                source: row.get(4)?,
+                language: row.get(5)?,
+                created_at: row.get(6)?,
+                updated_at: row.get(7)?,
             })
         })?;
 
@@ -569,6 +596,9 @@ impl StudyGraphStorage {
                 workspace_id,
                 title: row.title,
                 icon: row.icon,
+                tags: serde_json::from_str(&row.tags_json).unwrap_or_default(),
+                source: row.source,
+                language: row.language,
                 blocks: self.load_doc_blocks(page_id)?,
                 created_at: parse_datetime(&row.created_at)?,
                 updated_at: parse_datetime(&row.updated_at)?,
@@ -590,6 +620,9 @@ impl StudyGraphStorage {
             workspace_id,
             title: "StudyGraph Docs".to_string(),
             icon: "doc".to_string(),
+            tags: vec!["docs".to_string(), "studygraph".to_string()],
+            source: "Local workspace".to_string(),
+            language: "auto".to_string(),
             blocks: vec![
                 DocBlock {
                     id: Uuid::new_v4(),
@@ -629,6 +662,9 @@ impl StudyGraphStorage {
             workspace_id,
             title: normalize_text(title, "Untitled Doc"),
             icon: "doc".to_string(),
+            tags: Vec::new(),
+            source: String::new(),
+            language: "auto".to_string(),
             blocks: vec![DocBlock {
                 id: Uuid::new_v4(),
                 kind: DocBlockKind::Paragraph,
@@ -652,6 +688,31 @@ impl StudyGraphStorage {
             ",
             params![
                 normalize_text(title, "Untitled Doc"),
+                Utc::now().to_rfc3339(),
+                page_id.to_string(),
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn update_doc_page_metadata(
+        &self,
+        page_id: Uuid,
+        tags: Vec<String>,
+        source: &str,
+        language: &str,
+    ) -> StorageResult<()> {
+        let clean_tags = normalize_doc_tags(tags);
+        self.conn.execute(
+            "
+            UPDATE doc_pages
+            SET tags_json = ?1, source = ?2, language = ?3, updated_at = ?4
+            WHERE id = ?5
+            ",
+            params![
+                serde_json::to_string(&clean_tags)?,
+                source.trim(),
+                normalize_text(language, "auto"),
                 Utc::now().to_rfc3339(),
                 page_id.to_string(),
             ],
@@ -785,11 +846,14 @@ impl StudyGraphStorage {
         self.conn.execute(
             "
             INSERT INTO doc_pages
-                (id, workspace_id, title, icon, position, created_at, updated_at)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+                (id, workspace_id, title, icon, tags_json, source, language, position, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
             ON CONFLICT(id) DO UPDATE SET
                 title = excluded.title,
                 icon = excluded.icon,
+                tags_json = excluded.tags_json,
+                source = excluded.source,
+                language = excluded.language,
                 updated_at = excluded.updated_at
             ",
             params![
@@ -797,6 +861,9 @@ impl StudyGraphStorage {
                 page.workspace_id.to_string(),
                 normalize_text(&page.title, "Untitled Doc"),
                 normalize_text(&page.icon, "doc"),
+                serde_json::to_string(&normalize_doc_tags(page.tags.clone()))?,
+                page.source.trim(),
+                normalize_text(&page.language, "auto"),
                 position,
                 page.created_at.to_rfc3339(),
                 page.updated_at.to_rfc3339(),
@@ -1212,6 +1279,17 @@ fn normalize_text(value: &str, fallback: &str) -> String {
     }
 }
 
+fn normalize_doc_tags(tags: Vec<String>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for tag in tags {
+        let clean = tag.trim().trim_start_matches('#').to_lowercase();
+        if !clean.is_empty() && !normalized.contains(&clean) {
+            normalized.push(clean);
+        }
+    }
+    normalized
+}
+
 fn parse_datetime(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
     DateTime::parse_from_rfc3339(value).map(|datetime| datetime.with_timezone(&Utc))
 }
@@ -1278,6 +1356,9 @@ struct StoredDocPageRow {
     id: String,
     title: String,
     icon: String,
+    tags_json: String,
+    source: String,
+    language: String,
     created_at: String,
     updated_at: String,
 }

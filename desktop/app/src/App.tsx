@@ -38,6 +38,7 @@ import {
   setPageProperty,
   setBlockProperty,
   updateDocBlock,
+  updateDocPageMetadata,
   updateDocPageTitle,
   updateBlockContent,
 } from "./api";
@@ -781,8 +782,13 @@ export function App() {
       .filter(Boolean)
       .join("\n\n");
 
-    if (!sourceText) {
-      setDocStatus("Add text to this Doc before generating a deck.");
+    sendDocTextToGenerator(docPage, sourceText, `Doc "${docPage.title}"`, options);
+  }
+
+  function sendDocTextToGenerator(docPage: DocPage, sourceText: string, sourceLabel: string, options: DocDeckOptions = docDeckOptions) {
+    const cleanSourceText = sourceText.trim();
+    if (!cleanSourceText) {
+      setDocStatus("Add or select text before generating a deck.");
       return;
     }
 
@@ -790,9 +796,9 @@ export function App() {
       ...generatorInput,
       deck: singleLine(docPage.title, settings.defaultDeck),
       topic: settings.defaultTopic,
-      source_text: sourceText,
-      language: generatorInput.language,
-      number_of_cards: clampNumber(Math.max(generatorInput.number_of_cards, docPage.blocks.length), 1, 30),
+      source_text: cleanSourceText,
+      language: docPage.language === "auto" ? generatorInput.language : (docPage.language as CardGeneratorInput["language"]),
+      number_of_cards: clampNumber(Math.max(generatorInput.number_of_cards, estimateCardCount(cleanSourceText)), 1, 30),
       card_style: "mixed",
       bidirectional_cards: options.bidirectional,
       vocabulary_mode: options.vocabulary,
@@ -804,10 +810,10 @@ export function App() {
     setGeneratedCards(cards);
     setGeneratorStatus(
       cards.length > 0
-        ? `Prepared ${cards.length} local AI-style preview cards from Doc "${docPage.title}". No external API call was made.`
-        : "Doc text is too short for local card generation.",
+        ? `Prepared ${cards.length} local AI-style preview cards from ${sourceLabel}. No external API call was made.`
+        : "Selected Doc text is too short for local card generation.",
     );
-    setDocStatus("Doc sent to Generate Cards with the selected AI parsing options.");
+    setDocStatus(`Sent ${sourceLabel} to Generate Cards with the selected AI parsing options.`);
     setScreen("generate");
   }
 
@@ -1082,6 +1088,9 @@ export function App() {
             onCreatePage={() => void createNewDocPage()}
             onOpenPageByName={(name) => void openPageByName(name)}
             onRenamePage={(pageId, title) => void runDocMutation(() => updateDocPageTitle(pageId, title), pageId)}
+            onUpdatePageMetadata={(pageId, tags, source, language) =>
+              void runDocMutation(() => updateDocPageMetadata(pageId, tags, source, language), pageId)
+            }
             onDeletePage={(pageId) => {
               if (window.confirm("Delete this doc page?")) {
                 void runDocMutation(() => deleteDocPage(pageId));
@@ -1101,6 +1110,7 @@ export function App() {
             deckOptions={docDeckOptions}
             onDeckOptionsChange={(patch) => setDocDeckOptions((current) => ({ ...current, ...patch }))}
             onGenerateDeck={(docPage) => sendDocToGenerator(docPage)}
+            onGenerateSelection={(docPage, text) => sendDocTextToGenerator(docPage, text, "the selected Doc text")}
           />
         )}
         {screen === "todo" && (
@@ -1421,6 +1431,7 @@ function DocView({
   onCreatePage,
   onOpenPageByName,
   onRenamePage,
+  onUpdatePageMetadata,
   onDeletePage,
   onAddBlock,
   onAddSectionTemplate,
@@ -1431,6 +1442,7 @@ function DocView({
   deckOptions,
   onDeckOptionsChange,
   onGenerateDeck,
+  onGenerateSelection,
 }: {
   pages: DocPage[];
   editPages: Page[];
@@ -1441,6 +1453,7 @@ function DocView({
   onCreatePage: () => void;
   onOpenPageByName: (name: string) => void;
   onRenamePage: (pageId: string, title: string) => void;
+  onUpdatePageMetadata: (pageId: string, tags: string[], source: string, language: string) => void;
   onDeletePage: (pageId: string) => void;
   onAddBlock: (pageId: string, kind: DocBlockKind) => void;
   onAddSectionTemplate: (pageId: string) => void;
@@ -1451,7 +1464,11 @@ function DocView({
   deckOptions: DocDeckOptions;
   onDeckOptionsChange: (patch: Partial<DocDeckOptions>) => void;
   onGenerateDeck: (docPage: DocPage) => void;
+  onGenerateSelection: (docPage: DocPage, text: string) => void;
 }) {
+  const [docFilter, setDocFilter] = useState("");
+  const filteredDocPages = useMemo(() => filterDocPages(pages, docFilter), [pages, docFilter]);
+
   if (!selectedPage) {
     return (
       <section className="doc-empty">
@@ -1464,6 +1481,7 @@ function DocView({
 
   const headings = selectedPage.blocks.filter((block) => block.kind === "heading" && block.content.trim());
   const blockCounts = countDocBlockKinds(selectedPage.blocks);
+  const stats = docPageStats(selectedPage);
 
   return (
     <section className="doc">
@@ -1472,13 +1490,22 @@ function DocView({
           <strong>Docs</strong>
           <button onClick={onCreatePage}>+</button>
         </div>
-        {pages.map((page) => (
+        <div className="doc-outline-search">
+          <input
+            value={docFilter}
+            placeholder="Search docs, tags, source"
+            onChange={(event) => setDocFilter(event.target.value)}
+          />
+        </div>
+        {filteredDocPages.length === 0 && <p className="doc-outline-empty">No docs match.</p>}
+        {filteredDocPages.map((page) => (
           <button
             key={page.id}
             className={page.id === selectedPage.id ? "active" : ""}
             onClick={() => onSelectPage(page.id)}
           >
-            {page.title}
+            <span>{page.title}</span>
+            {page.tags.length > 0 && <small>{page.tags.slice(0, 2).join(", ")}</small>}
           </button>
         ))}
         <div className="doc-outline-section">
@@ -1536,20 +1563,26 @@ function DocView({
         <p className="doc-kicker">Documentation</p>
         <DocTitleEditor page={selectedPage} onRenamePage={onRenamePage} />
         <p className="doc-lead">
-          Persistent Notion-style documentation stored in SQLite. Use it for longer explanations, project notes,
-          manuals, and learning material that should live next to your cards.
+          Markdown-backed document editor with local SQLite persistence, autosave on blur/debounce, and offline deck generation.
         </p>
-        <p className="doc-target">
-          Card target: {selectedEditPageName ?? "select an Edit Desk page"}
-        </p>
+        <DocMetadataEditor page={selectedPage} onUpdatePageMetadata={onUpdatePageMetadata} />
+        <div className="doc-stats-row">
+          <span>{stats.words} words</span>
+          <span>{stats.characters} characters</span>
+          <span>{selectedPage.blocks.length} blocks</span>
+          <span>Updated {formatShortDateTime(selectedPage.updatedAt)}</span>
+          <span>Card target: {selectedEditPageName ?? "select an Edit Desk page"}</span>
+        </div>
         <div className="doc-cover" />
 
-        <div className="doc-toolbar">
+        <div className="doc-toolbar ribbon">
+          <span className="ribbon-label">Insert</span>
           <button onClick={() => onAddBlock(selectedPage.id, "paragraph")}>Paragraph</button>
           <button onClick={() => onAddBlock(selectedPage.id, "heading")}>Heading</button>
           <button onClick={() => onAddBlock(selectedPage.id, "todo")}>Todo</button>
           <button onClick={() => onAddBlock(selectedPage.id, "quote")}>Quote</button>
           <button className="primary" onClick={() => onAddSectionTemplate(selectedPage.id)}>Section Template</button>
+          <span className="ribbon-label">Cards</span>
           <button className="primary" onClick={() => onGenerateDeck(selectedPage)}>AI Deck from Doc</button>
           <button className="danger subtle" onClick={() => onDeletePage(selectedPage.id)}>Delete Page</button>
         </div>
@@ -1571,11 +1604,80 @@ function DocView({
                 pages={editPages}
                 onOpenPageByName={onOpenPageByName}
                 onCreateCard={(block) => onCreateCard(selectedPage, block)}
+                onGenerateSelection={(text) => onGenerateSelection(selectedPage, text)}
               />
             ))
           )}
         </div>
       </article>
+    </section>
+  );
+}
+
+function DocMetadataEditor({
+  page,
+  onUpdatePageMetadata,
+}: {
+  page: DocPage;
+  onUpdatePageMetadata: (pageId: string, tags: string[], source: string, language: string) => void;
+}) {
+  const [tagsDraft, setTagsDraft] = useState(page.tags.join(", "));
+  const [sourceDraft, setSourceDraft] = useState(page.source);
+  const [languageDraft, setLanguageDraft] = useState(page.language || "auto");
+
+  useEffect(() => {
+    setTagsDraft(page.tags.join(", "));
+    setSourceDraft(page.source);
+    setLanguageDraft(page.language || "auto");
+  }, [page.id, page.tags, page.source, page.language]);
+
+  function save() {
+    const tags = splitTags(tagsDraft);
+    if (
+      tags.join(",") !== page.tags.join(",") ||
+      sourceDraft.trim() !== page.source ||
+      languageDraft !== page.language
+    ) {
+      onUpdatePageMetadata(page.id, tags, sourceDraft, languageDraft);
+    }
+  }
+
+  return (
+    <section className="doc-metadata">
+      <label>
+        Tags
+        <input
+          value={tagsDraft}
+          placeholder="exam, linguistics, source-notes"
+          onChange={(event) => setTagsDraft(event.target.value)}
+          onBlur={save}
+        />
+      </label>
+      <label>
+        Source
+        <input
+          value={sourceDraft}
+          placeholder="Book, lecture, URL, or own notes"
+          onChange={(event) => setSourceDraft(event.target.value)}
+          onBlur={save}
+        />
+      </label>
+      <label>
+        Language
+        <select
+          value={languageDraft}
+          onChange={(event) => {
+            const value = event.target.value;
+            setLanguageDraft(value);
+            onUpdatePageMetadata(page.id, splitTags(tagsDraft), sourceDraft, value);
+          }}
+        >
+          <option value="auto">Auto</option>
+          <option value="en">English</option>
+          <option value="de">German</option>
+        </select>
+      </label>
+      <button onClick={save}>Save metadata</button>
     </section>
   );
 }
@@ -1624,6 +1726,7 @@ function DocBlockEditor({
   pages,
   onOpenPageByName,
   onCreateCard,
+  onGenerateSelection,
 }: {
   block: DocBlock;
   isFirst: boolean;
@@ -1634,17 +1737,31 @@ function DocBlockEditor({
   pages: Page[];
   onOpenPageByName: (name: string) => void;
   onCreateCard: (block: DocBlock) => void;
+  onGenerateSelection: (text: string) => void;
 }) {
   const [draft, setDraft] = useState(block.content);
   const [kind, setKind] = useState<DocBlockKind>(block.kind);
   const [checked, setChecked] = useState(block.checked);
+  const [saveState, setSaveState] = useState<"saved" | "dirty" | "saving">("saved");
+  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
   const links = useMemo(() => extractPageLinks(draft), [draft]);
+  const stats = useMemo(() => textStats(draft), [draft]);
 
   useEffect(() => {
     setDraft(block.content);
     setKind(block.kind);
     setChecked(block.checked);
+    setSaveState("saved");
   }, [block.id, block.content, block.kind, block.checked]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) {
+        window.clearTimeout(saveTimerRef.current);
+      }
+    };
+  }, []);
 
   function save(next?: Partial<DocBlock>) {
     const merged = {
@@ -1655,8 +1772,44 @@ function DocBlockEditor({
       ...next,
     };
     if (merged.kind !== block.kind || merged.content !== block.content || merged.checked !== block.checked) {
+      setSaveState("saving");
       onUpdateBlock(merged);
+      window.setTimeout(() => setSaveState("saved"), 260);
+    } else {
+      setSaveState("saved");
     }
+  }
+
+  function scheduleSave(nextDraft: string) {
+    setDraft(nextDraft);
+    setSaveState("dirty");
+    if (saveTimerRef.current !== null) {
+      window.clearTimeout(saveTimerRef.current);
+    }
+    saveTimerRef.current = window.setTimeout(() => {
+      const merged = { ...block, kind, content: nextDraft, checked };
+      setSaveState("saving");
+      onUpdateBlock(merged);
+      window.setTimeout(() => setSaveState("saved"), 260);
+    }, 900);
+  }
+
+  function applyFormat(action: DocFormatAction) {
+    const textarea = textareaRef.current;
+    if (!textarea) return;
+    const next = formatDocText(draft, textarea.selectionStart, textarea.selectionEnd, action);
+    scheduleSave(next.value);
+    window.setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(next.selectionStart, next.selectionEnd);
+    }, 0);
+  }
+
+  function selectedOrFullText() {
+    const textarea = textareaRef.current;
+    if (!textarea) return draft;
+    const selected = draft.slice(textarea.selectionStart, textarea.selectionEnd).trim();
+    return selected || draft.trim();
   }
 
   return (
@@ -1689,18 +1842,49 @@ function DocBlockEditor({
             Done
           </label>
         )}
+        <span className={`doc-save-state ${saveState}`}>{saveState === "dirty" ? "Unsaved" : saveState === "saving" ? "Saving..." : "Saved"}</span>
         <button disabled={isFirst} onClick={() => onMoveBlock(block.id, -1)}>Up</button>
         <button disabled={isLast} onClick={() => onMoveBlock(block.id, 1)}>Down</button>
         <button onClick={() => onCreateCard({ ...block, kind, content: draft, checked })}>Create Card</button>
+        <button onClick={() => onGenerateSelection(selectedOrFullText())}>Cards from selection</button>
         <button className="danger subtle" onClick={() => onDeleteBlock(block.id)}>Delete</button>
       </div>
+      <div className="doc-format-toolbar" aria-label="Document formatting toolbar">
+        <button title="Bold Ctrl+B" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bold")}>B</button>
+        <button title="Italic Ctrl+I" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("italic")}><em>I</em></button>
+        <button title="Underline Ctrl+U" onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("underline")}><u>U</u></button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("heading1")}>H1</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("heading2")}>H2</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("bullet")}>• List</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("numbered")}>1. List</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("quote")}>Quote</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("code")}>Code</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("alignLeft")}>Left</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("alignCenter")}>Center</button>
+        <button onMouseDown={(event) => event.preventDefault()} onClick={() => applyFormat("alignRight")}>Right</button>
+      </div>
       <textarea
+        ref={textareaRef}
+        className="doc-page-textarea"
         value={draft}
-        rows={kind === "heading" ? 1 : 3}
+        rows={kind === "heading" ? 2 : 7}
         placeholder={placeholderForDocKind(kind)}
-        onChange={(event) => setDraft(event.target.value)}
+        onChange={(event) => scheduleSave(event.target.value)}
         onBlur={() => save()}
+        onKeyDown={(event) => {
+          if (!(event.ctrlKey || event.metaKey)) return;
+          const key = event.key.toLowerCase();
+          if (key === "b" || key === "i" || key === "u") {
+            event.preventDefault();
+            applyFormat(key === "b" ? "bold" : key === "i" ? "italic" : "underline");
+          }
+        }}
       />
+      <div className="doc-block-footer">
+        <span>{stats.words} words</span>
+        <span>{stats.characters} chars</span>
+        <span>Markdown shortcuts enabled</span>
+      </div>
       <PageLinkChips links={links} pages={pages} onOpenPageByName={onOpenPageByName} />
     </article>
   );
@@ -3349,14 +3533,111 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
   return [...baseCards, ...bidirectionalCards, ...vocabularyCards];
 }
 
+type DocFormatAction =
+  | "bold"
+  | "italic"
+  | "underline"
+  | "heading1"
+  | "heading2"
+  | "bullet"
+  | "numbered"
+  | "quote"
+  | "code"
+  | "alignLeft"
+  | "alignCenter"
+  | "alignRight";
+
 function placeholderForDocKind(kind: DocBlockKind) {
   const placeholders: Record<DocBlockKind, string> = {
     heading: "Section heading",
-    paragraph: "Write a paragraph...",
+    paragraph: "Start writing. Use Ctrl+B/I/U, toolbar formatting, lists, quotes, code, and [[page links]].",
     todo: "Task or checklist item...",
     quote: "Quote or callout...",
   };
   return placeholders[kind];
+}
+
+function formatDocText(value: string, selectionStart: number, selectionEnd: number, action: DocFormatAction) {
+  const selected = value.slice(selectionStart, selectionEnd) || placeholderForFormat(action);
+  const before = value.slice(0, selectionStart);
+  const after = value.slice(selectionEnd);
+  const linePrefix = (prefix: string) => selected.split("\n").map((line) => `${prefix}${line || " "}`).join("\n");
+  const numbered = selected.split("\n").map((line, index) => `${index + 1}. ${line || " "}`).join("\n");
+
+  const replacements: Record<DocFormatAction, string> = {
+    bold: `**${selected}**`,
+    italic: `*${selected}*`,
+    underline: `<u>${selected}</u>`,
+    heading1: linePrefix("# "),
+    heading2: linePrefix("## "),
+    bullet: linePrefix("- "),
+    numbered,
+    quote: linePrefix("> "),
+    code: selected.includes("\n") ? `\`\`\`\n${selected}\n\`\`\`` : `\`${selected}\``,
+    alignLeft: `<div align="left">\n${selected}\n</div>`,
+    alignCenter: `<div align="center">\n${selected}\n</div>`,
+    alignRight: `<div align="right">\n${selected}\n</div>`,
+  };
+  const replacement = replacements[action];
+  return {
+    value: `${before}${replacement}${after}`,
+    selectionStart: before.length,
+    selectionEnd: before.length + replacement.length,
+  };
+}
+
+function placeholderForFormat(action: DocFormatAction) {
+  if (action === "heading1" || action === "heading2") return "Heading";
+  if (action === "bullet" || action === "numbered") return "List item";
+  if (action === "quote") return "Quoted text";
+  if (action === "code") return "code";
+  return "text";
+}
+
+function textStats(text: string) {
+  const clean = stripPageLinks(text).trim();
+  return {
+    words: clean ? clean.split(/\s+/).filter(Boolean).length : 0,
+    characters: text.length,
+  };
+}
+
+function docPageStats(page: DocPage) {
+  return textStats(page.blocks.map((block) => block.content).join("\n\n"));
+}
+
+function estimateCardCount(sourceText: string) {
+  const stats = textStats(sourceText);
+  return clampNumber(Math.ceil(stats.words / 45), 3, 18);
+}
+
+function splitTags(value: string) {
+  return value
+    .split(/[#,]/)
+    .map((tag) => tag.trim().replace(/^#/, "").toLowerCase())
+    .filter(Boolean)
+    .filter((tag, index, tags) => tags.indexOf(tag) === index);
+}
+
+function filterDocPages(pages: DocPage[], query: string) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return pages;
+  return pages.filter((page) => {
+    const haystack = [
+      page.title,
+      page.tags.join(" "),
+      page.source,
+      page.language,
+      page.blocks.map((block) => block.content).join(" "),
+    ].join(" ").toLowerCase();
+    return haystack.includes(needle);
+  });
+}
+
+function formatShortDateTime(value: string) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "unknown";
+  return date.toLocaleString(undefined, { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
 }
 
 function docQuestionFromBlock(block: DocBlock) {

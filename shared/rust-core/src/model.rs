@@ -112,9 +112,19 @@ pub struct DocPage {
     pub workspace_id: WorkspaceId,
     pub title: String,
     pub icon: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default = "default_doc_language")]
+    pub language: String,
     pub blocks: Vec<DocBlock>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+fn default_doc_language() -> String {
+    "auto".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

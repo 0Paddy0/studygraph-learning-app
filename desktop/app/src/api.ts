@@ -44,6 +44,17 @@ export async function updateDocPageTitle(pageId: string, title: string): Promise
   return invoke<DocPage[]>("update_doc_page_title", { pageId, title });
 }
 
+export async function updateDocPageMetadata(
+  pageId: string,
+  tags: string[],
+  source: string,
+  language: string,
+): Promise<DocPage[]> {
+  return invoke<DocPage[]>("update_doc_page_metadata", {
+    input: { pageId, tags, source, language },
+  });
+}
+
 export async function deleteDocPage(pageId: string): Promise<DocPage[]> {
   return invoke<DocPage[]>("delete_doc_page", { pageId });
 }

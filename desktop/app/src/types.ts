@@ -56,6 +56,9 @@ export interface DocPage {
   workspaceId: string;
   title: string;
   icon: string;
+  tags: string[];
+  source: string;
+  language: string;
   blocks: DocBlock[];
   createdAt: string;
   updatedAt: string;
