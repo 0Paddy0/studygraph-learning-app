@@ -28,6 +28,7 @@
     "targets": "all",
     "category": "Productivity",
     "icon": [
+      "icons/icon.png",
       "icons/icon.ico"
     ]
   }

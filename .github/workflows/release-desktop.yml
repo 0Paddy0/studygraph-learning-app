@@ -56,7 +56,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force release-artifacts/windows | Out-Null
-          Get-ChildItem -Recurse desktop/app/src-tauri/target/release/bundle -File |
+          Get-ChildItem -Recurse target/release/bundle -File |
             Where-Object { $_.Extension -in '.msi','.exe' } |
             Copy-Item -Destination release-artifacts/windows
 
@@ -65,7 +65,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p release-artifacts/linux
-          find desktop/app/src-tauri/target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} release-artifacts/linux/ \;
+          find target/release/bundle -type f \( -name '*.AppImage' -o -name '*.deb' -o -name '*.rpm' \) -exec cp {} release-artifacts/linux/ \;
 
       - uses: actions/upload-artifact@v4
         with:
