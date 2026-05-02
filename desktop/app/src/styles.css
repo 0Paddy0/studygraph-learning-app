@@ -100,7 +100,7 @@ label {
   border-right: 1px solid rgba(178, 211, 210, 0.16);
   padding: 16px 12px;
   display: grid;
-  grid-template-rows: auto auto 1fr;
+  grid-template-rows: auto auto auto 1fr;
   gap: 18px;
   min-height: 0;
 }
@@ -127,6 +127,11 @@ label {
   display: block;
   color: #8eb0af;
   margin-top: 3px;
+}
+
+.generate-shortcut {
+  width: 100%;
+  text-align: left;
 }
 
 .nav {

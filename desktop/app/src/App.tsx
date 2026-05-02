@@ -65,6 +65,12 @@ type PracticeMode = "all" | "deck" | "weak" | "new" | "graph";
 type MaybePromise<T = void> = T | Promise<T>;
 type TodoStatus = "open" | "doing" | "done";
 
+interface DocDeckOptions {
+  bidirectional: boolean;
+  vocabulary: boolean;
+  vocabularyDeck: string;
+}
+
 type SearchResultType = "page" | "block" | "card" | "command";
 
 interface SearchResult {
@@ -83,8 +89,13 @@ interface TodoItem {
   pageId: string;
   pageName: string;
   block: Block;
+  blockIds: string[];
   path: string[];
   status: TodoStatus;
+  scope: "block" | "topic";
+  deck?: string;
+  topic?: string;
+  cardCount?: number;
 }
 
 const sampleImport = `# Ungarisch Mini
@@ -129,6 +140,11 @@ export function App() {
   const [docPages, setDocPages] = useState<DocPage[]>([]);
   const [selectedDocPageId, setSelectedDocPageId] = useState<string | null>(null);
   const [docStatus, setDocStatus] = useState<string | null>(null);
+  const [docDeckOptions, setDocDeckOptions] = useState<DocDeckOptions>({
+    bidirectional: false,
+    vocabulary: false,
+    vocabularyDeck: "Vocabulary",
+  });
   const [settings, setSettings] = useState<AppSettings>(() => loadFallbackAppSettings());
   const [generatorInput, setGeneratorInput] = useState<CardGeneratorInput>(() => {
     const initialSettings = loadFallbackAppSettings();
@@ -140,6 +156,9 @@ export function App() {
       number_of_cards: 6,
       difficulty: "medium",
       card_style: "basic",
+      bidirectional_cards: false,
+      vocabulary_mode: false,
+      vocabulary_deck: "Vocabulary",
     };
   });
   const [generatedCards, setGeneratedCards] = useState<GeneratedCard[]>([]);
@@ -528,16 +547,23 @@ export function App() {
     setError(null);
     setTodoStatus("Updating task...");
     try {
-      let next = await setBlockProperty(item.block.id, "sgd-todo", status);
-      if (status === "done") {
-        next = await setBlockProperty(item.block.id, "sgd-todo-done-at", new Date().toISOString());
-      } else if (item.block.properties["sgd-todo-done-at"]) {
-        next = await removeBlockProperty(item.block.id, "sgd-todo-done-at");
+      let next = snapshot;
+      for (const blockId of item.blockIds) {
+        next = await setBlockProperty(blockId, "sgd-todo", status);
+        if (status === "done") {
+          next = await setBlockProperty(blockId, "sgd-todo-done-at", new Date().toISOString());
+        } else if (item.blockIds.length === 1 && item.block.properties["sgd-todo-done-at"]) {
+          next = await removeBlockProperty(blockId, "sgd-todo-done-at");
+        }
+      }
+      if (!next) {
+        setTodoStatus("No matching item blocks found.");
+        return;
       }
       setSnapshot(next);
       setSelectedPageId(item.pageId);
       setFocusedBlockId(item.block.id);
-      setTodoStatus(status === "done" ? "Task completed." : `Task moved to ${status}.`);
+      setTodoStatus(status === "done" ? "Item completed." : status === "doing" ? "Item moved to Next up." : "Item moved to Open.");
     } catch (mutationError) {
       setTodoStatus(mutationError instanceof Error ? mutationError.message : String(mutationError));
     }
@@ -749,6 +775,42 @@ export function App() {
     }
   }
 
+  function sendDocToGenerator(docPage: DocPage, options: DocDeckOptions = docDeckOptions) {
+    const sourceText = docPage.blocks
+      .map((block) => stripPageLinks(block.content).trim())
+      .filter(Boolean)
+      .join("\n\n");
+
+    if (!sourceText) {
+      setDocStatus("Add text to this Doc before generating a deck.");
+      return;
+    }
+
+    const nextInput: CardGeneratorInput = {
+      ...generatorInput,
+      deck: singleLine(docPage.title, settings.defaultDeck),
+      topic: settings.defaultTopic,
+      source_text: sourceText,
+      language: generatorInput.language,
+      number_of_cards: clampNumber(Math.max(generatorInput.number_of_cards, docPage.blocks.length), 1, 30),
+      card_style: "mixed",
+      bidirectional_cards: options.bidirectional,
+      vocabulary_mode: options.vocabulary,
+      vocabulary_deck: singleLine(options.vocabularyDeck, "Vocabulary"),
+    };
+
+    setGeneratorInput(nextInput);
+    const cards = mockGenerateCards(nextInput);
+    setGeneratedCards(cards);
+    setGeneratorStatus(
+      cards.length > 0
+        ? `Prepared ${cards.length} local AI-style preview cards from Doc "${docPage.title}". No external API call was made.`
+        : "Doc text is too short for local card generation.",
+    );
+    setDocStatus("Doc sent to Generate Cards with the selected AI parsing options.");
+    setScreen("generate");
+  }
+
   function openBlock(pageId: string, blockId: string) {
     setSelectedPageId(pageId);
     setFocusedBlockId(blockId);
@@ -873,7 +935,7 @@ export function App() {
     [snapshot, paletteQuery],
   );
   const filteredPages = useMemo(() => filterPages(pages, pageFilter), [pages, pageFilter]);
-  const todoItems = useMemo(() => buildTodoItems(pages), [pages]);
+  const todoItems = useMemo(() => buildTodoItems(pages, cards), [pages, cards]);
   const decks = useMemo(() => groupCardsByDeck(cards), [cards]);
   const allDueCards = useMemo(() => cards.filter(isDue), [cards]);
   const dueCards = useMemo(() => buildReviewQueue(cards, reviewNodeId), [cards, reviewNodeId]);
@@ -896,7 +958,14 @@ export function App() {
           </div>
         </div>
 
-        <nav className="nav">
+        <button
+          className={screen === "generate" ? "primary generate-shortcut active" : "primary generate-shortcut"}
+          onClick={() => setScreen("generate")}
+        >
+          Generate Cards
+        </button>
+
+        <nav className="nav" aria-label="Main navigation">
           <button className={screen === "notes" ? "active" : ""} onClick={() => setScreen("notes")}>Edit Desk</button>
           <button className={screen === "doc" ? "active" : ""} onClick={() => {
             setScreen("doc");
@@ -914,7 +983,6 @@ export function App() {
           <button className={screen === "review" ? "active" : ""} onClick={() => startDueReview()}>Review</button>
           <button className={screen === "practice" ? "active" : ""} onClick={() => startPractice("all")}>Free Practice</button>
           <button className={screen === "graph" ? "active" : ""} onClick={() => setScreen("graph")}>Study Graph</button>
-          <button className={screen === "generate" ? "active" : ""} onClick={() => setScreen("generate")}>Generate Cards</button>
           <button className={screen === "settings" ? "active" : ""} onClick={() => {
             setScreen("settings");
             void refreshDebugInfo();
@@ -1030,6 +1098,9 @@ export function App() {
             onDeleteBlock={(blockId) => void runDocMutation(() => deleteDocBlock(blockId), selectedDocPage?.id)}
             onMoveBlock={(blockId, direction) => void runDocMutation(() => moveDocBlock(blockId, direction), selectedDocPage?.id)}
             onCreateCard={(docPage, block) => void createCardFromDocBlock(docPage, block)}
+            deckOptions={docDeckOptions}
+            onDeckOptionsChange={(patch) => setDocDeckOptions((current) => ({ ...current, ...patch }))}
+            onGenerateDeck={(docPage) => sendDocToGenerator(docPage)}
           />
         )}
         {screen === "todo" && (
@@ -1357,6 +1428,9 @@ function DocView({
   onDeleteBlock,
   onMoveBlock,
   onCreateCard,
+  deckOptions,
+  onDeckOptionsChange,
+  onGenerateDeck,
 }: {
   pages: DocPage[];
   editPages: Page[];
@@ -1374,6 +1448,9 @@ function DocView({
   onDeleteBlock: (blockId: string) => MaybePromise;
   onMoveBlock: (blockId: string, direction: number) => void;
   onCreateCard: (docPage: DocPage, block: DocBlock) => void;
+  deckOptions: DocDeckOptions;
+  onDeckOptionsChange: (patch: Partial<DocDeckOptions>) => void;
+  onGenerateDeck: (docPage: DocPage) => void;
 }) {
   if (!selectedPage) {
     return (
@@ -1427,6 +1504,32 @@ function DocView({
           <span>{blockCounts.todo} todos</span>
           <span>{blockCounts.quote} quotes</span>
         </div>
+        <div className="doc-outline-section doc-ai-options">
+          <strong>AI deck from Doc</strong>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={deckOptions.bidirectional}
+              onChange={(event) => onDeckOptionsChange({ bidirectional: event.target.checked })}
+            />
+            Bidirectional cards
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={deckOptions.vocabulary}
+              onChange={(event) => onDeckOptionsChange({ vocabulary: event.target.checked })}
+            />
+            Vocabulary deck
+          </label>
+          <input
+            value={deckOptions.vocabularyDeck}
+            placeholder="Vocabulary deck name"
+            onChange={(event) => onDeckOptionsChange({ vocabularyDeck: event.target.value })}
+          />
+          <button className="primary" onClick={() => onGenerateDeck(selectedPage)}>Parse Doc Text</button>
+          <small>Offline stub: prepares local preview cards in Generate Cards. No paid API call.</small>
+        </div>
       </aside>
 
       <article className="doc-page">
@@ -1447,6 +1550,7 @@ function DocView({
           <button onClick={() => onAddBlock(selectedPage.id, "todo")}>Todo</button>
           <button onClick={() => onAddBlock(selectedPage.id, "quote")}>Quote</button>
           <button className="primary" onClick={() => onAddSectionTemplate(selectedPage.id)}>Section Template</button>
+          <button className="primary" onClick={() => onGenerateDeck(selectedPage)}>AI Deck from Doc</button>
           <button className="danger subtle" onClick={() => onDeletePage(selectedPage.id)}>Delete Page</button>
         </div>
         {status && <p className="status">{status}</p>}
@@ -2073,8 +2177,8 @@ function TodoView({
     <section className="todo">
       <div className="todo-capture">
         <div>
-          <h2>Quick Capture</h2>
-          <p>Tasks are normal Edit Desk bullet blocks with `sgd-todo` metadata.</p>
+          <h2>Learning Queue</h2>
+          <p>Open auto-lists unlearned card topics. Move items to Next up to control what appears in learning.</p>
         </div>
         <div className="todo-input-row">
           <input
@@ -2100,13 +2204,13 @@ function TodoView({
       <div className="todo-toolbar">
         <input value={filter} placeholder="Filter tasks" onChange={(event) => setFilter(event.target.value)} />
         <span>{openItems.length} open</span>
-        <span>{doingItems.length} doing</span>
+        <span>{doingItems.length} next up</span>
         <span>{doneItems.length} done</span>
       </div>
 
       <div className="todo-board">
-        <TodoColumn title="Open" items={openItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
-        <TodoColumn title="Doing" items={doingItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
+        <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
+        <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
         <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
       </div>
     </section>
@@ -2136,12 +2240,12 @@ function TodoColumn({
         items.map((item) => (
           <article className={`todo-item ${item.status}`} key={item.id}>
             <button className="todo-title" onClick={() => onOpenBlock(item.pageId, item.block.id)}>
-              {stripTodoPrefix(stripPageLinks(item.block.content))}
+              {todoItemTitle(item)}
             </button>
-            <small>{item.pageName}{item.path.length > 1 ? ` / ${item.path.slice(0, -1).map(stripPageLinks).join(" / ")}` : ""}</small>
+            <small>{todoItemSubtitle(item)}</small>
             <div className="todo-actions">
               <button disabled={item.status === "open"} onClick={() => onSetStatus(item, "open")}>Open</button>
-              <button disabled={item.status === "doing"} onClick={() => onSetStatus(item, "doing")}>Doing</button>
+              <button disabled={item.status === "doing"} onClick={() => onSetStatus(item, "doing")}>Next up</button>
               <button className="success" disabled={item.status === "done"} onClick={() => onSetStatus(item, "done")}>Done</button>
             </div>
           </article>
@@ -2639,6 +2743,26 @@ function GeneratorView({
               <option value="mixed">Mixed</option>
             </select>
           </label>
+          <label className="toggle-row generator-toggle">
+            <input
+              type="checkbox"
+              checked={input.bidirectional_cards}
+              onChange={(event) => onInputChange({ bidirectional_cards: event.target.checked })}
+            />
+            Bidirectional cards
+          </label>
+          <label className="toggle-row generator-toggle">
+            <input
+              type="checkbox"
+              checked={input.vocabulary_mode}
+              onChange={(event) => onInputChange({ vocabulary_mode: event.target.checked })}
+            />
+            Vocabulary / language deck
+          </label>
+          <label>
+            Vocabulary deck
+            <input value={input.vocabulary_deck} onChange={(event) => onInputChange({ vocabulary_deck: event.target.value })} />
+          </label>
         </div>
 
         <label>
@@ -2717,6 +2841,7 @@ function SettingsView({
   onApplyGeneratorDefaults: () => void;
 }) {
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [apiKeyDraft, setApiKeyDraft] = useState("");
   const totalBlocks = useMemo(() => countBlocks(snapshot?.workspace.pages ?? []), [snapshot]);
   const topicCount = useMemo(
     () => new Set((snapshot?.cards ?? []).map((card) => `${card.deck_slug}:${card.topic_slug}`)).size,
@@ -2745,6 +2870,37 @@ function SettingsView({
     } catch {
       setCopyStatus("Clipboard is not available. Select the report manually.");
     }
+  }
+
+  function connectOpenAiAccountStub() {
+    const email = window.prompt("OpenAI/GPT account email (stub only)", settings.openAiAccountEmail || "");
+    if (email === null) return;
+    onSettingsChange({
+      apiProviderEnabled: true,
+      openAiConnectionMode: "account",
+      openAiAccountEmail: email,
+      openAiAccountStatus: "stub-connected",
+    });
+  }
+
+  function saveApiKeyStub() {
+    const trimmed = apiKeyDraft.trim();
+    if (!trimmed) {
+      onSettingsChange({
+        openAiConnectionMode: "apiKey",
+        openAiApiKeyConfigured: false,
+        openAiApiKeyLastFour: "",
+      });
+      return;
+    }
+
+    onSettingsChange({
+      apiProviderEnabled: true,
+      openAiConnectionMode: "apiKey",
+      openAiApiKeyConfigured: true,
+      openAiApiKeyLastFour: trimmed.slice(-4),
+    });
+    setApiKeyDraft("");
   }
 
   return (
@@ -2792,15 +2948,62 @@ function SettingsView({
         </article>
 
         <article className="settings-panel">
-          <h2>Future API Provider</h2>
+          <h2>GPT / OpenAI Connection</h2>
+          <p className="settings-note">Preferred path: connect a GPT/OpenAI account. API keys are a fallback and may create extra usage costs.</p>
           <label className="toggle-row">
             <input
               type="checkbox"
               checked={settings.apiProviderEnabled}
               onChange={(event) => onSettingsChange({ apiProviderEnabled: event.target.checked })}
             />
-            Enable provider settings
+            Enable AI provider settings
           </label>
+          <label>
+            Connection mode
+            <select
+              value={settings.openAiConnectionMode}
+              onChange={(event) => onSettingsChange({ openAiConnectionMode: event.target.value as AppSettings["openAiConnectionMode"] })}
+            >
+              <option value="none">Not connected</option>
+              <option value="account">GPT/OpenAI account (preferred)</option>
+              <option value="apiKey">API key fallback</option>
+            </select>
+          </label>
+          <div className="button-row">
+            <button className="primary" onClick={connectOpenAiAccountStub}>Connect GPT/OpenAI Account</button>
+            <button
+              onClick={() => onSettingsChange({
+                openAiConnectionMode: "none",
+                openAiAccountStatus: "not-connected",
+                openAiAccountEmail: "",
+                openAiApiKeyConfigured: false,
+                openAiApiKeyLastFour: "",
+              })}
+            >
+              Disconnect Stub
+            </button>
+          </div>
+          <div className="debug-stats">
+            <span>Account: {settings.openAiAccountStatus}</span>
+            <span>Email: {settings.openAiAccountEmail || "not set"}</span>
+            <span>API key: {settings.openAiApiKeyConfigured ? `configured (*${settings.openAiApiKeyLastFour})` : "not stored"}</span>
+          </div>
+          <label>
+            API key fallback (stored as stub metadata only)
+            <input
+              type="password"
+              value={apiKeyDraft}
+              placeholder={settings.openAiApiKeyConfigured ? `Configured, ending ${settings.openAiApiKeyLastFour}` : "sk-..."}
+              onChange={(event) => setApiKeyDraft(event.target.value)}
+            />
+          </label>
+          <div className="button-row">
+            <button onClick={saveApiKeyStub}>Save API Key Stub</button>
+            <button onClick={() => {
+              setApiKeyDraft("");
+              onSettingsChange({ openAiApiKeyConfigured: false, openAiApiKeyLastFour: "" });
+            }}>Clear API Key Stub</button>
+          </div>
           <label>
             API base URL
             <input value={settings.apiBaseUrl} onChange={(event) => onSettingsChange({ apiBaseUrl: event.target.value })} />
@@ -2809,11 +3012,7 @@ function SettingsView({
             Model
             <input value={settings.apiModel} onChange={(event) => onSettingsChange({ apiModel: event.target.value })} />
           </label>
-          <label>
-            API key
-            <input value="" disabled placeholder="Not stored in this MVP" />
-          </label>
-          <p className="settings-note">The current generator is offline. External requests are not implemented or sent automatically.</p>
+          <p className="settings-note">The current generator remains offline. These controls only persist connection intent; no OAuth, API key validation, or paid request is made.</p>
         </article>
       </div>
 
@@ -3088,9 +3287,10 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
   const language = resolveGeneratorLanguage(input.language, input.source_text);
   const deck = singleLine(input.deck, "Generated");
   const topic = singleLine(input.topic, "General");
+  const vocabularyDeck = singleLine(input.vocabulary_deck, `${deck} Vocabulary`);
   const limit = clampNumber(input.number_of_cards, 1, 30);
 
-  return sentences.slice(0, limit).map((sentence, index) => {
+  const baseCards = sentences.slice(0, limit).map((sentence, index) => {
     const term = pickKeyTerm(sentence, topic);
     const style = input.card_style === "mixed" ? (index % 3 === 1 ? "cloze" : "basic") : input.card_style;
     const promptPrefix =
@@ -3111,7 +3311,7 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
         topic,
         tags: ["generated", input.difficulty, "cloze"],
         source_summary: shorten(sentence, 120),
-      };
+      } satisfies GeneratedCard;
     }
 
     return {
@@ -3121,8 +3321,32 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
       topic,
       tags: ["generated", input.difficulty, "basic"],
       source_summary: shorten(sentence, 120),
-    };
+    } satisfies GeneratedCard;
   });
+
+  const bidirectionalCards = input.bidirectional_cards
+    ? baseCards.map((card) => ({
+        question: language === "de" ? `Welche Frage passt zu: ${shorten(card.answer, 90)}?` : `Which prompt matches: ${shorten(card.answer, 90)}?`,
+        answer: card.question,
+        deck: card.deck,
+        topic: card.topic,
+        tags: [...card.tags.filter((tag) => tag !== "basic" && tag !== "cloze"), "bidirectional"],
+        source_summary: card.source_summary,
+      } satisfies GeneratedCard))
+    : [];
+
+  const vocabularyCards = input.vocabulary_mode
+    ? extractVocabularyTerms(sentences, topic).slice(0, Math.min(limit, 12)).map(({ term, sentence }) => ({
+        question: language === "de" ? `Was bedeutet "${term}" in diesem Text?` : `What does "${term}" mean in this text?`,
+        answer: language === "de" ? `Kontext: ${sentence}` : `Context: ${sentence}`,
+        deck: vocabularyDeck,
+        topic: language === "de" ? "Vokabeln" : "Vocabulary",
+        tags: ["generated", "vocabulary", "language-learning"],
+        source_summary: shorten(sentence, 120),
+      } satisfies GeneratedCard))
+    : [];
+
+  return [...baseCards, ...bidirectionalCards, ...vocabularyCards];
 }
 
 function placeholderForDocKind(kind: DocBlockKind) {
@@ -3162,6 +3386,11 @@ const defaultAppSettings: AppSettings = {
   apiProviderEnabled: false,
   apiBaseUrl: "",
   apiModel: "",
+  openAiConnectionMode: "none",
+  openAiAccountEmail: "",
+  openAiAccountStatus: "not-connected",
+  openAiApiKeyConfigured: false,
+  openAiApiKeyLastFour: "",
   debugMode: false,
 };
 
@@ -3174,6 +3403,11 @@ function normalizeAppSettings(settings: AppSettings): AppSettings {
     reviewsPerDay: clampNumber(settings.reviewsPerDay, 0, 2000),
     apiBaseUrl: settings.apiBaseUrl.trim(),
     apiModel: settings.apiModel.trim(),
+    openAiConnectionMode: ["account", "apiKey"].includes(settings.openAiConnectionMode) ? settings.openAiConnectionMode : "none",
+    openAiAccountEmail: settings.openAiAccountEmail.trim(),
+    openAiAccountStatus: singleLine(settings.openAiAccountStatus, defaultAppSettings.openAiAccountStatus),
+    openAiApiKeyConfigured: Boolean(settings.openAiApiKeyConfigured),
+    openAiApiKeyLastFour: settings.openAiApiKeyLastFour.replace(/[^a-zA-Z0-9]/g, "").slice(-4),
   };
 }
 
@@ -3192,6 +3426,11 @@ function loadFallbackAppSettings(): AppSettings {
       newCardsPerDay: parsed.newCardsPerDay ?? defaultAppSettings.newCardsPerDay,
       reviewsPerDay: parsed.reviewsPerDay ?? defaultAppSettings.reviewsPerDay,
       apiProviderEnabled: Boolean(parsed.apiProviderEnabled),
+      openAiConnectionMode: parsed.openAiConnectionMode ?? defaultAppSettings.openAiConnectionMode,
+      openAiAccountEmail: parsed.openAiAccountEmail ?? defaultAppSettings.openAiAccountEmail,
+      openAiAccountStatus: parsed.openAiAccountStatus ?? defaultAppSettings.openAiAccountStatus,
+      openAiApiKeyConfigured: Boolean(parsed.openAiApiKeyConfigured),
+      openAiApiKeyLastFour: parsed.openAiApiKeyLastFour ?? defaultAppSettings.openAiApiKeyLastFour,
       debugMode: Boolean(parsed.debugMode),
     });
   } catch {
@@ -3223,6 +3462,56 @@ function resolveGeneratorLanguage(language: CardGeneratorInput["language"], sour
   return /[äöüß]/i.test(sourceText) || /\b(der|die|das|und|ist|eine|einen|mit|fuer|für|nicht)\b/.test(lower)
     ? "de"
     : "en";
+}
+
+function extractVocabularyTerms(sentences: string[], topic: string) {
+  const seen = new Set<string>();
+  const terms: Array<{ term: string; sentence: string }> = [];
+
+  for (const sentence of sentences) {
+    for (const rawWord of sentence.replace(/[`*_()[\]{}"':;,.!?]/g, " ").split(/\s+/)) {
+      const term = rawWord.trim();
+      const normalized = term.toLocaleLowerCase();
+      if (term.length < 4 || seen.has(normalized) || normalizeVocabularyStopWords(topic).has(normalized)) {
+        continue;
+      }
+      seen.add(normalized);
+      terms.push({ term, sentence });
+    }
+  }
+
+  return terms.sort((left, right) => right.term.length - left.term.length);
+}
+
+function normalizeVocabularyStopWords(topic: string) {
+  return new Set([
+    "about",
+    "after",
+    "also",
+    "and",
+    "are",
+    "because",
+    "das",
+    "der",
+    "die",
+    "eine",
+    "einen",
+    "for",
+    "from",
+    "ist",
+    "mit",
+    "nicht",
+    "oder",
+    "that",
+    "the",
+    "this",
+    "und",
+    "von",
+    "was",
+    "were",
+    "with",
+    ...topic.split(/[\s/,-]+/).map((word) => word.toLocaleLowerCase()).filter((word) => word.length > 0),
+  ]);
 }
 
 function pickKeyTerm(sentence: string, topic: string) {
@@ -3343,6 +3632,10 @@ function buildDebugReport({
     `New cards/day: ${settings.newCardsPerDay}`,
     `Reviews/day: ${settings.reviewsPerDay}`,
     `API provider enabled: ${settings.apiProviderEnabled}`,
+    `OpenAI mode: ${settings.openAiConnectionMode}`,
+    `OpenAI account status: ${settings.openAiAccountStatus}`,
+    `OpenAI account email set: ${settings.openAiAccountEmail ? "yes" : "no"}`,
+    `API key stub configured: ${settings.openAiApiKeyConfigured ? `yes (*${settings.openAiApiKeyLastFour})` : "no"}`,
     `API base URL set: ${settings.apiBaseUrl.trim() ? "yes" : "no"}`,
     `API model: ${settings.apiModel || "not set"}`,
     `Debug mode: ${settings.debugMode}`,
@@ -3390,7 +3683,15 @@ function groupCardsByDeck(cards: StudyCard[]) {
 
 function buildReviewQueue(cards: StudyCard[], nodeId: string | null) {
   const scopedCards = nodeId ? cardsForGraphNode(cards, nodeId) : cards;
-  return scopedCards.filter(isDue).sort(sortReviewCards);
+  const nextUpCards = scopedCards.filter((card) => todoStatusForCard(card) === "doing");
+  if (nextUpCards.length > 0) {
+    return nextUpCards.sort(sortReviewCards);
+  }
+
+  return scopedCards
+    .filter((card) => todoStatusForCard(card) !== "done")
+    .filter(isDue)
+    .sort(sortReviewCards);
 }
 
 function buildPracticeQueue(cards: StudyCard[], mode: PracticeMode, deckSlug: string, nodeId: string) {
@@ -3482,25 +3783,82 @@ function buildBlockLocations(pages: Page[]) {
   return locations;
 }
 
-function buildTodoItems(pages: Page[]): TodoItem[] {
-  return pages.flatMap((page) =>
-    flattenBlocks(page.blocks)
-      .map((entry) => {
-        const status = todoStatusForBlock(entry.block);
-        if (!status) {
-          return null;
-        }
-        return {
-          id: entry.block.id,
-          pageId: page.id,
-          pageName: page.name,
-          block: entry.block,
-          path: entry.path,
-          status,
-        } satisfies TodoItem;
-      })
-      .filter((item): item is TodoItem => item !== null),
-  );
+function buildTodoItems(pages: Page[], cards: StudyCard[]): TodoItem[] {
+  const blockEntries = new Map<string, { page: Page; block: Block; path: string[] }>();
+  for (const page of pages) {
+    for (const entry of flattenBlocks(page.blocks)) {
+      blockEntries.set(entry.block.id, { page, block: entry.block, path: entry.path });
+    }
+  }
+
+  const cardBlockIds = new Set(cards.map((card) => card.block_id));
+  const items: TodoItem[] = [];
+
+  for (const entry of blockEntries.values()) {
+    if (cardBlockIds.has(entry.block.id)) {
+      continue;
+    }
+    const status = todoStatusForBlock(entry.block);
+    if (!status) {
+      continue;
+    }
+    items.push({
+      id: entry.block.id,
+      pageId: entry.page.id,
+      pageName: entry.page.name,
+      block: entry.block,
+      blockIds: [entry.block.id],
+      path: entry.path,
+      status,
+      scope: "block",
+    });
+  }
+
+  const topicGroups = new Map<string, Array<{ card: StudyCard; entry: { page: Page; block: Block; path: string[] } }>>();
+  for (const card of cards) {
+    const entry = blockEntries.get(card.block_id);
+    if (!entry) {
+      continue;
+    }
+    const key = `${card.deck_slug}:${card.topic_slug}`;
+    topicGroups.set(key, [...(topicGroups.get(key) ?? []), { card, entry }]);
+  }
+
+  for (const [key, group] of topicGroups) {
+    const statuses = group.map(({ card }) => todoStatusForCard(card)).filter((status): status is TodoStatus => Boolean(status));
+    const hasUnlearnedCards = group.some(({ card }) => isUnlearnedCard(card));
+    if (!hasUnlearnedCards && statuses.length === 0) {
+      continue;
+    }
+
+    const status = statuses.includes("doing")
+      ? "doing"
+      : statuses.length > 0 && statuses.every((value) => value === "done")
+        ? "done"
+        : "open";
+    const first = group[0];
+    items.push({
+      id: `topic:${key}`,
+      pageId: first.entry.page.id,
+      pageName: first.entry.page.name,
+      block: first.entry.block,
+      blockIds: group.map(({ card }) => card.block_id),
+      path: [first.card.deck, first.card.topic],
+      status,
+      scope: "topic",
+      deck: first.card.deck,
+      topic: first.card.topic,
+      cardCount: group.length,
+    });
+  }
+
+  return items.sort((left, right) => {
+    const statusCompare = todoStatusOrder(left.status) - todoStatusOrder(right.status);
+    if (statusCompare !== 0) return statusCompare;
+    const titleCompare = todoItemTitle(left).localeCompare(todoItemTitle(right));
+    if (titleCompare !== 0) return titleCompare;
+    return left.pageName.localeCompare(right.pageName);
+  });
 }
 
 function countDocBlockKinds(blocks: DocBlock[]) {
@@ -3540,6 +3898,20 @@ function normalizeTodoToken(value: string): TodoStatus | null {
   return null;
 }
 
+function todoStatusForCard(card: StudyCard): TodoStatus | null {
+  return normalizeTodoToken(card.properties["sgd-todo"] ?? card.properties.todo ?? "");
+}
+
+function isUnlearnedCard(card: StudyCard) {
+  return card.srs.reps === 0 || card.srs.state === "new";
+}
+
+function todoStatusOrder(status: TodoStatus) {
+  if (status === "open") return 0;
+  if (status === "doing") return 1;
+  return 2;
+}
+
 function filterTodoItems(items: TodoItem[], query: string) {
   const normalized = normalizeSearchText(query);
   if (!normalized) {
@@ -3555,6 +3927,21 @@ function stripTodoPrefix(value: string) {
     .replace(/^(\- )?\[[ xX]\]\s+/, "")
     .replace(/^(todo|doing|done)\s+/i, "")
     .trim() || "Untitled task";
+}
+
+function todoItemTitle(item: TodoItem) {
+  if (item.scope === "topic") {
+    return `${item.deck ?? "Deck"} / ${item.topic ?? "Topic"}`;
+  }
+  return stripTodoPrefix(stripPageLinks(item.block.content));
+}
+
+function todoItemSubtitle(item: TodoItem) {
+  if (item.scope === "topic") {
+    const count = item.cardCount === 1 ? "1 card" : `${item.cardCount ?? item.blockIds.length} cards`;
+    return `${count} | first source: ${item.pageName}`;
+  }
+  return `${item.pageName}${item.path.length > 1 ? ` / ${item.path.slice(0, -1).map(stripPageLinks).join(" / ")}` : ""}`;
 }
 
 function filterPages(pages: Page[], query: string) {

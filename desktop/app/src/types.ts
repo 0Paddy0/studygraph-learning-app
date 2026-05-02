@@ -11,6 +11,9 @@ export interface CardGeneratorInput {
   number_of_cards: number;
   difficulty: GeneratorDifficulty;
   card_style: GeneratorStyle;
+  bidirectional_cards: boolean;
+  vocabulary_mode: boolean;
+  vocabulary_deck: string;
 }
 
 export interface GeneratedCard {
@@ -30,6 +33,11 @@ export interface AppSettings {
   apiProviderEnabled: boolean;
   apiBaseUrl: string;
   apiModel: string;
+  openAiConnectionMode: "none" | "account" | "apiKey";
+  openAiAccountEmail: string;
+  openAiAccountStatus: string;
+  openAiApiKeyConfigured: boolean;
+  openAiApiKeyLastFour: string;
   debugMode: boolean;
 }
 

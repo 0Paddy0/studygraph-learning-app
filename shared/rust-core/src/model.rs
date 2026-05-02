@@ -137,7 +137,7 @@ pub enum DocBlockKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub default_deck: String,
     pub default_topic: String,
@@ -146,6 +146,11 @@ pub struct AppSettings {
     pub api_provider_enabled: bool,
     pub api_base_url: String,
     pub api_model: String,
+    pub open_ai_connection_mode: String,
+    pub open_ai_account_email: String,
+    pub open_ai_account_status: String,
+    pub open_ai_api_key_configured: bool,
+    pub open_ai_api_key_last_four: String,
     pub debug_mode: bool,
 }
 
@@ -159,6 +164,11 @@ impl Default for AppSettings {
             api_provider_enabled: false,
             api_base_url: String::new(),
             api_model: String::new(),
+            open_ai_connection_mode: "none".to_string(),
+            open_ai_account_email: String::new(),
+            open_ai_account_status: "not-connected".to_string(),
+            open_ai_api_key_configured: false,
+            open_ai_api_key_last_four: String::new(),
             debug_mode: false,
         }
     }
@@ -172,6 +182,28 @@ impl AppSettings {
         self.reviews_per_day = self.reviews_per_day.min(2000);
         self.api_base_url = self.api_base_url.trim().to_string();
         self.api_model = self.api_model.trim().to_string();
+        self.open_ai_connection_mode = match self.open_ai_connection_mode.trim() {
+            "account" => "account".to_string(),
+            "apiKey" | "api_key" | "api-key" => "apiKey".to_string(),
+            _ => "none".to_string(),
+        };
+        self.open_ai_account_email = self.open_ai_account_email.trim().to_string();
+        self.open_ai_account_status = normalize_inline(&self.open_ai_account_status, "not-connected");
+        self.open_ai_api_key_last_four = self
+            .open_ai_api_key_last_four
+            .chars()
+            .filter(|character| character.is_ascii_alphanumeric())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .take(4)
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect();
+        if self.open_ai_api_key_last_four.is_empty() {
+            self.open_ai_api_key_configured = false;
+        }
         self
     }
 }

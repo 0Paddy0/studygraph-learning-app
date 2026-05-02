@@ -1442,6 +1442,11 @@ mod tests {
             api_provider_enabled: true,
             api_base_url: " https://example.test/api ".to_string(),
             api_model: " study-model ".to_string(),
+            open_ai_connection_mode: "account".to_string(),
+            open_ai_account_email: " pat@example.test ".to_string(),
+            open_ai_account_status: " stub-connected ".to_string(),
+            open_ai_api_key_configured: true,
+            open_ai_api_key_last_four: " abcd1234 ".to_string(),
             debug_mode: true,
         };
 
@@ -1454,6 +1459,10 @@ mod tests {
         assert_eq!(loaded.reviews_per_day, 2000);
         assert_eq!(loaded.api_base_url, "https://example.test/api");
         assert!(loaded.api_provider_enabled);
+        assert_eq!(loaded.open_ai_connection_mode, "account");
+        assert_eq!(loaded.open_ai_account_email, "pat@example.test");
+        assert_eq!(loaded.open_ai_api_key_last_four, "1234");
+        assert!(loaded.open_ai_api_key_configured);
         assert!(loaded.debug_mode);
     }
 
