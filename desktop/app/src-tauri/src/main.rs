@@ -718,7 +718,7 @@ fn insert_generated_cards(
                 .insert("sgd-generated".to_string(), "true".to_string());
             block
                 .properties
-                .insert("sgd-source".to_string(), "mock".to_string());
+                .insert("sgd-source".to_string(), "local-generator".to_string());
 
             let tags = card
                 .tags
@@ -1027,6 +1027,17 @@ fn ensure_workspace(state: &tauri::State<'_, AppState>) -> Result<Uuid, String> 
             .map_err(format_storage_error)?;
         id
     };
+
+    if let Some(mut workspace) = storage
+        .load_workspace(workspace_id)
+        .map_err(format_storage_error)?
+    {
+        if ensure_seed_study_decks(&mut workspace) {
+            storage
+                .save_workspace(&workspace)
+                .map_err(format_storage_error)?;
+        }
+    }
 
     *state
         .workspace_id
@@ -1345,6 +1356,180 @@ fn outdent_block_in_tree(blocks: &mut Vec<Block>, block_id: Uuid) -> Result<bool
     }
 
     Ok(false)
+}
+
+struct SeedCard {
+    question: &'static str,
+    answer: &'static str,
+    topic: &'static str,
+}
+
+fn ensure_seed_study_decks(workspace: &mut Workspace) -> bool {
+    let mut changed = false;
+    changed |= ensure_seed_page(
+        workspace,
+        "Decks/CPU Architecture",
+        "CPU Architecture",
+        cpu_architecture_seed_cards(),
+    );
+    changed |= ensure_seed_page(
+        workspace,
+        "Decks/Mathe für AI",
+        "Mathe für AI",
+        ai_math_seed_cards(),
+    );
+    changed
+}
+
+fn ensure_seed_page(
+    workspace: &mut Workspace,
+    page_name: &str,
+    deck_name: &str,
+    cards: &[SeedCard],
+) -> bool {
+    if workspace.pages.iter().any(|page| page.name == page_name) {
+        return false;
+    }
+
+    let mut properties = BTreeMap::new();
+    properties.insert("sgd-deck".to_string(), deck_name.to_string());
+    properties.insert("sgd-seed".to_string(), "studygraph-builtins-v1".to_string());
+
+    let blocks = cards
+        .iter()
+        .map(|card| {
+            let mut block = new_block(format!("{} #card", card.question));
+            block
+                .properties
+                .insert("sgd-deck".to_string(), deck_name.to_string());
+            block
+                .properties
+                .insert("sgd-topic".to_string(), card.topic.to_string());
+            block
+                .properties
+                .insert("sgd-seed".to_string(), "studygraph-builtins-v1".to_string());
+            block.children.push(new_block(card.answer.to_string()));
+            block
+        })
+        .collect();
+
+    workspace.pages.push(Page {
+        id: Uuid::new_v4(),
+        name: page_name.to_string(),
+        properties,
+        blocks,
+    });
+    true
+}
+
+fn cpu_architecture_seed_cards() -> &'static [SeedCard; 50] {
+    &[
+        SeedCard { question: "What is an instruction set architecture (ISA)?", answer: "An ISA is the contract between software and CPU hardware: instructions, registers, memory model, and encodings. Example: x86-64 and ARMv8 are different ISAs.", topic: "ISA" },
+        SeedCard { question: "What is a microarchitecture?", answer: "Microarchitecture is how a processor implements an ISA internally. Example: two ARM CPUs can share ARMv8 but differ in pipeline width, cache sizes, and branch predictors.", topic: "Microarchitecture" },
+        SeedCard { question: "What is the fetch-decode-execute cycle?", answer: "The CPU fetches an instruction, decodes its operation and operands, then executes it and writes results. Example: ADD R1,R2,R3 is fetched, decoded as addition, then computed by the ALU.", topic: "Execution" },
+        SeedCard { question: "What does the program counter store?", answer: "The program counter stores the address of the next instruction to fetch. Example: after a 4-byte instruction, many RISC CPUs advance PC by 4 unless a branch changes it.", topic: "Registers" },
+        SeedCard { question: "What is a general-purpose register?", answer: "A general-purpose register is a small fast storage location for operands, addresses, or intermediate values. Example: x86-64 RAX can hold an integer result.", topic: "Registers" },
+        SeedCard { question: "What is an arithmetic logic unit (ALU)?", answer: "The ALU performs integer arithmetic and logical operations. Example: addition, subtraction, AND, OR, and XOR are ALU operations.", topic: "Datapath" },
+        SeedCard { question: "What is a floating-point unit (FPU)?", answer: "The FPU executes floating-point arithmetic with IEEE-like formats. Example: multiplying two 32-bit floats in a matrix operation uses the FPU or vector FP units.", topic: "Datapath" },
+        SeedCard { question: "What is pipelining?", answer: "Pipelining overlaps instruction stages so multiple instructions progress at once. Example: while one instruction executes, the next can decode and another can fetch.", topic: "Pipeline" },
+        SeedCard { question: "What is pipeline latency vs throughput?", answer: "Latency is time for one instruction to pass through; throughput is completed instructions per time. Example: a 5-stage pipeline may have 5-cycle latency but near 1 instruction/cycle throughput.", topic: "Pipeline" },
+        SeedCard { question: "What is a pipeline hazard?", answer: "A hazard prevents the next instruction from executing safely in the next cycle. Example: an instruction needing a value not yet produced causes a data hazard.", topic: "Pipeline" },
+        SeedCard { question: "What is a data hazard?", answer: "A data hazard occurs when instructions depend on unfinished results. Example: ADD writes R1 and the following SUB reads R1 before writeback.", topic: "Pipeline" },
+        SeedCard { question: "What is forwarding/bypassing?", answer: "Forwarding sends a result directly from a pipeline stage to a dependent instruction without waiting for register writeback. Example: ALU output feeds the next ALU operation.", topic: "Pipeline" },
+        SeedCard { question: "What is a control hazard?", answer: "A control hazard happens when the CPU does not yet know the next PC after a branch or jump. Example: a conditional branch may force wrong-path instructions to be flushed.", topic: "Branching" },
+        SeedCard { question: "What is branch prediction?", answer: "Branch prediction guesses branch direction/target to keep the pipeline full. Example: a loop branch is predicted taken until the final iteration.", topic: "Branching" },
+        SeedCard { question: "What is speculative execution?", answer: "Speculative execution runs instructions before knowing they are definitely needed. Example: a CPU executes predicted branch-path instructions and discards them if prediction was wrong.", topic: "Branching" },
+        SeedCard { question: "What is out-of-order execution?", answer: "Out-of-order execution runs ready instructions before older stalled ones while preserving architectural results. Example: a cache-miss load waits while independent arithmetic continues.", topic: "Execution" },
+        SeedCard { question: "What is register renaming?", answer: "Register renaming maps architectural registers to physical registers to remove false dependencies. Example: two writes to R1 can use different physical registers internally.", topic: "Execution" },
+        SeedCard { question: "What is superscalar execution?", answer: "A superscalar CPU can issue multiple instructions per cycle to multiple execution units. Example: one load and one integer add may start in the same cycle.", topic: "Execution" },
+        SeedCard { question: "What is SIMD?", answer: "SIMD applies one instruction to multiple data lanes. Example: adding eight 32-bit integers with one AVX2 vector instruction.", topic: "Vector" },
+        SeedCard { question: "What is a vector register?", answer: "A vector register holds multiple values processed together by SIMD/vector instructions. Example: a 256-bit register can hold eight 32-bit floats.", topic: "Vector" },
+        SeedCard { question: "What is the memory hierarchy?", answer: "The memory hierarchy orders storage by speed, size, and cost: registers, caches, RAM, SSD. Example: L1 cache is tiny and fast; DRAM is larger and slower.", topic: "Memory" },
+        SeedCard { question: "What is an L1 cache?", answer: "L1 cache is the smallest, fastest cache closest to the core. Example: separate L1 instruction and data caches often serve accesses in a few cycles.", topic: "Cache" },
+        SeedCard { question: "What is cache locality?", answer: "Locality means programs reuse nearby or recently used data. Example: iterating an array sequentially benefits from spatial locality.", topic: "Cache" },
+        SeedCard { question: "What is a cache line?", answer: "A cache line is the fixed-size block transferred between cache and memory. Example: reading one byte may load a 64-byte line containing neighboring bytes.", topic: "Cache" },
+        SeedCard { question: "What is a cache miss?", answer: "A cache miss occurs when requested data is not in the cache and must be fetched from a lower level. Example: first access to a large array line misses in L1.", topic: "Cache" },
+        SeedCard { question: "What is cache associativity?", answer: "Associativity defines how many cache locations can hold a given memory block. Example: 8-way set-associative cache allows a line in one of eight ways in its set.", topic: "Cache" },
+        SeedCard { question: "What is cache coherence?", answer: "Cache coherence keeps multiple cores' cached copies consistent. Example: if core A writes a shared variable, core B must not keep using a stale copy.", topic: "Multicore" },
+        SeedCard { question: "What is MESI?", answer: "MESI is a common cache-coherence state model: Modified, Exclusive, Shared, Invalid. Example: a written private line becomes Modified until shared or written back.", topic: "Multicore" },
+        SeedCard { question: "What is virtual memory?", answer: "Virtual memory gives each process its own address space mapped to physical memory. Example: two programs can both use virtual address 0x400000 safely.", topic: "Memory" },
+        SeedCard { question: "What is a page table?", answer: "A page table maps virtual pages to physical frames with permissions. Example: a load address is translated before accessing memory.", topic: "Memory" },
+        SeedCard { question: "What is a TLB?", answer: "A translation lookaside buffer caches virtual-to-physical address translations. Example: repeated access to the same page avoids walking the page table.", topic: "Memory" },
+        SeedCard { question: "What is endianness?", answer: "Endianness defines byte order for multi-byte values in memory. Example: little-endian stores the least significant byte of 0x12345678 first.", topic: "Data Representation" },
+        SeedCard { question: "What is word size?", answer: "Word size is the natural integer/address size a CPU handles efficiently. Example: a 64-bit CPU typically uses 64-bit general-purpose registers and virtual addresses.", topic: "Data Representation" },
+        SeedCard { question: "What is RISC?", answer: "RISC favors simpler, regular instructions and load/store design. Example: ARM and RISC-V usually operate on registers and use separate load/store instructions.", topic: "ISA" },
+        SeedCard { question: "What is CISC?", answer: "CISC supports more complex instructions and addressing modes. Example: x86 can combine memory access and arithmetic in one instruction.", topic: "ISA" },
+        SeedCard { question: "What is a load/store architecture?", answer: "Only load/store instructions access memory; arithmetic uses registers. Example: RISC-V loads values into registers before ADD.", topic: "ISA" },
+        SeedCard { question: "What is an addressing mode?", answer: "An addressing mode describes how an instruction computes an operand address. Example: base + offset addressing reads memory at register plus immediate displacement.", topic: "ISA" },
+        SeedCard { question: "What is an interrupt?", answer: "An interrupt pauses normal execution to handle an external or internal event. Example: a timer interrupt lets the OS scheduler run.", topic: "System" },
+        SeedCard { question: "What is an exception?", answer: "An exception is a synchronous event caused by the current instruction. Example: divide-by-zero or page fault transfers control to an OS handler.", topic: "System" },
+        SeedCard { question: "What is privilege level?", answer: "Privilege levels restrict sensitive instructions and memory access. Example: user mode cannot directly modify page tables; kernel mode can.", topic: "System" },
+        SeedCard { question: "What is a system call?", answer: "A system call is a controlled transition from user code to the kernel. Example: read() asks the OS to fetch bytes from a file descriptor.", topic: "System" },
+        SeedCard { question: "What is a memory barrier?", answer: "A memory barrier constrains reordering of memory operations. Example: lock-free code uses barriers so another core observes writes in the intended order.", topic: "Concurrency" },
+        SeedCard { question: "What is atomic read-modify-write?", answer: "An atomic RMW reads and updates memory as one indivisible operation. Example: compare-and-swap changes a value only if it still equals the expected value.", topic: "Concurrency" },
+        SeedCard { question: "What is simultaneous multithreading (SMT)?", answer: "SMT lets one physical core issue instructions from multiple hardware threads. Example: Intel Hyper-Threading can use idle execution units from a second thread.", topic: "Multicore" },
+        SeedCard { question: "What is a core vs a socket?", answer: "A core is an execution engine; a socket is a physical CPU package containing one or more cores. Example: a server may have two sockets with 32 cores each.", topic: "Multicore" },
+        SeedCard { question: "What is NUMA?", answer: "NUMA means memory access time depends on which CPU node owns the memory. Example: a thread runs faster when its data is allocated on the local socket.", topic: "Multicore" },
+        SeedCard { question: "What is a hardware prefetcher?", answer: "A prefetcher predicts future memory accesses and loads data before demand. Example: sequential array traversal may trigger prefetching of upcoming cache lines.", topic: "Cache" },
+        SeedCard { question: "What is a reorder buffer (ROB)?", answer: "A ROB tracks in-flight instructions and commits them in program order. Example: out-of-order execution finishes early operations but retires them safely through the ROB.", topic: "Execution" },
+        SeedCard { question: "What is microcode?", answer: "Microcode is internal control code used to implement complex instructions or patches. Example: a complex x86 instruction may decode into micro-operations controlled by microcode.", topic: "Microarchitecture" },
+        SeedCard { question: "What is performance per watt?", answer: "Performance per watt measures work completed for each unit of power. Example: mobile CPUs prioritize high performance per watt to preserve battery life.", topic: "Performance" },
+    ]
+}
+
+fn ai_math_seed_cards() -> &'static [SeedCard; 50] {
+    &[
+        SeedCard { question: "Was ist eine Menge?", answer: "Eine Menge ist eine Sammlung unterscheidbarer Elemente. Beispiel: A = {1, 2, 3} kann die Klassen-IDs eines Klassifikators enthalten.", topic: "Mengenlehre" },
+        SeedCard { question: "Was bedeutet Teilmenge A ⊆ B?", answer: "A ist Teilmenge von B, wenn jedes Element aus A auch in B liegt. Beispiel: Trainingsbilder mit Label Katze sind Teilmenge aller Trainingsbilder.", topic: "Mengenlehre" },
+        SeedCard { question: "Was ist die Vereinigung A ∪ B?", answer: "Die Vereinigung enthält alle Elemente, die in A oder B liegen. Beispiel: Daten aus Quelle A und Quelle B werden zu einem größeren Trainingsset vereinigt.", topic: "Mengenlehre" },
+        SeedCard { question: "Was ist der Schnitt A ∩ B?", answer: "Der Schnitt enthält Elemente, die in A und B liegen. Beispiel: Bilder, die sowohl 'Hund' als auch 'Outdoor' markiert sind.", topic: "Mengenlehre" },
+        SeedCard { question: "Was ist die Differenz A \\ B?", answer: "A \\ B enthält Elemente aus A, die nicht in B liegen. Beispiel: Trainingsdaten ohne die bereits im Validierungsset genutzten Beispiele.", topic: "Mengenlehre" },
+        SeedCard { question: "Was ist das kartesische Produkt A × B?", answer: "A × B ist die Menge aller geordneten Paare aus A und B. Beispiel: Nutzer × Filme beschreibt mögliche Ratings in einem Empfehlungssystem.", topic: "Mengenlehre" },
+        SeedCard { question: "Was ist eine Relation?", answer: "Eine Relation verknüpft Elemente aus Mengen, oft als Teilmenge eines kartesischen Produkts. Beispiel: 'Bild hat Label' ist eine Relation zwischen Bildern und Klassen.", topic: "Mengenlehre" },
+        SeedCard { question: "Was ist eine Funktion?", answer: "Eine Funktion ordnet jedem Eingabewert genau einen Ausgabewert zu. Beispiel: ein neuronales Netz f(x) gibt für ein Bild x Klassenwahrscheinlichkeiten zurück.", topic: "Funktionen" },
+        SeedCard { question: "Was bedeutet Injektivität?", answer: "Eine Funktion ist injektiv, wenn verschiedene Eingaben verschiedene Ausgaben haben. Beispiel: ein perfektes Encoding ohne Kollisionen wäre injektiv.", topic: "Funktionen" },
+        SeedCard { question: "Was ist Komposition von Funktionen?", answer: "Bei Komposition wird die Ausgabe einer Funktion Eingabe der nächsten. Beispiel: h(x)=g(f(x)) entspricht mehreren Layern in einem neuronalen Netz.", topic: "Funktionen" },
+        SeedCard { question: "Was ist ein Vektor?", answer: "Ein Vektor ist eine geordnete Liste von Zahlen mit Richtung/Koordinaten. Beispiel: ein Embedding [0.2, -0.1, 0.7] repräsentiert ein Wort im Modellraum.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist eine Matrix?", answer: "Eine Matrix ist ein rechteckiges Zahlenschema für lineare Abbildungen oder Daten. Beispiel: Gewichte eines Dense-Layers bilden eine Matrix W.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was bedeutet Matrix-Vektor-Multiplikation?", answer: "Sie transformiert einen Vektor linear durch gewichtete Summen. Beispiel: y = Wx berechnet die Voraktivierungen eines neuronalen Layers.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist ein Skalarprodukt?", answer: "Das Skalarprodukt misst gewichtete Ähnlichkeit zweier Vektoren. Beispiel: Query- und Key-Vektoren in Attention werden per Dot Product verglichen.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist die Norm eines Vektors?", answer: "Eine Norm misst die Länge oder Größe eines Vektors. Beispiel: ||w||₂ wird in L2-Regularisierung bestraft, um Gewichte klein zu halten.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist Kosinusähnlichkeit?", answer: "Kosinusähnlichkeit misst den Winkel zwischen Vektoren unabhängig von der Länge. Beispiel: semantisch ähnliche Text-Embeddings haben oft hohen Kosinuswert.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist ein Eigenvektor?", answer: "Ein Eigenvektor ändert durch eine Matrix nur seine Länge, nicht seine Richtung. Beispiel: PCA nutzt Eigenvektoren der Kovarianzmatrix als Hauptachsen.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist Rang einer Matrix?", answer: "Der Rang ist die Anzahl unabhängiger Richtungen/Spalten. Beispiel: niedriger Rang kann Modellgewichte komprimieren, etwa bei Low-Rank-Adaptern.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist ein Tensor?", answer: "Ein Tensor ist ein mehrdimensionales Zahlenarray. Beispiel: ein Bildbatch kann Form [Batch, Höhe, Breite, Kanäle] haben.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was bedeutet Broadcasting?", answer: "Broadcasting erweitert kleinere Arrays implizit auf kompatible Formen. Beispiel: ein Bias-Vektor wird zu jeder Zeile einer Aktivierungsmatrix addiert.", topic: "Lineare Algebra" },
+        SeedCard { question: "Was ist eine Ableitung?", answer: "Eine Ableitung misst lokale Änderungsrate einer Funktion. Beispiel: dLoss/dw zeigt, wie stark ein Gewicht den Fehler verändert.", topic: "Analysis" },
+        SeedCard { question: "Was ist ein Gradient?", answer: "Der Gradient ist der Vektor aller partiellen Ableitungen. Beispiel: ∇L zeigt die Richtung des steilsten Anstiegs der Loss-Funktion.", topic: "Analysis" },
+        SeedCard { question: "Was ist partielle Ableitung?", answer: "Eine partielle Ableitung betrachtet die Änderung nach einer Variable, während andere konstant bleiben. Beispiel: ∂L/∂w_i für ein einzelnes Gewicht.", topic: "Analysis" },
+        SeedCard { question: "Was ist die Kettenregel?", answer: "Die Kettenregel leitet zusammengesetzte Funktionen ab. Beispiel: Backpropagation nutzt sie, um Gradienten durch Layer eines Netzes zu propagieren.", topic: "Analysis" },
+        SeedCard { question: "Was ist der Hessian?", answer: "Der Hessian ist die Matrix zweiter Ableitungen und beschreibt Krümmung. Beispiel: Optimierer können Krümmungsinformation nutzen, sind aber bei großen Netzen teuer.", topic: "Analysis" },
+        SeedCard { question: "Was ist Konvexität?", answer: "Eine konvexe Funktion hat keine schlechten lokalen Minima: jede Verbindungslinie liegt über dem Graphen. Beispiel: lineare Regression mit MSE ist konvex.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Gradientenabstieg?", answer: "Gradientenabstieg aktualisiert Parameter entgegen dem Gradienten, um Loss zu senken. Beispiel: w := w - η∇L.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Lernrate η?", answer: "Die Lernrate steuert die Schrittgröße beim Optimieren. Beispiel: zu große η kann divergieren, zu kleine η lernt sehr langsam.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Stochastic Gradient Descent (SGD)?", answer: "SGD schätzt Gradienten mit einzelnen Beispielen oder Mini-Batches. Beispiel: ein Batch von 64 Bildern liefert ein Update statt des ganzen Datensatzes.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Momentum?", answer: "Momentum glättet Updates durch eine laufende Bewegungsrichtung. Beispiel: es hilft, durch flache Täler schneller in konsistenter Richtung zu laufen.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Adam?", answer: "Adam kombiniert Momentum mit adaptiven Lernraten pro Parameter. Beispiel: Transformer werden häufig mit Adam oder AdamW trainiert.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Regularisierung?", answer: "Regularisierung begrenzt Modellkomplexität, um Overfitting zu reduzieren. Beispiel: L2-Regularisierung bestraft große Gewichte.", topic: "Optimierung" },
+        SeedCard { question: "Was ist Wahrscheinlichkeit P(A)?", answer: "P(A) misst, wie wahrscheinlich ein Ereignis A ist, zwischen 0 und 1. Beispiel: P(Label=Katze | Bild)=0.82 als Modellvorhersage.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was ist bedingte Wahrscheinlichkeit?", answer: "P(A|B) ist die Wahrscheinlichkeit von A unter der Annahme, dass B gilt. Beispiel: P(Spam | Wörter im Text) in einem Spamfilter.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was sagt der Satz von Bayes?", answer: "Bayes aktualisiert Wahrscheinlichkeiten mit Evidenz: P(A|B)=P(B|A)P(A)/P(B). Beispiel: Diagnosewahrscheinlichkeit nach positivem Test.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was ist eine Zufallsvariable?", answer: "Eine Zufallsvariable ordnet Ergebnissen Zahlen zu. Beispiel: X kann die Anzahl korrekt klassifizierter Bilder in einem Batch sein.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was ist Erwartungswert?", answer: "Der Erwartungswert ist der langfristige Durchschnitt einer Zufallsvariable. Beispiel: die erwartete Loss über die Datenverteilung wird minimiert.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was ist Varianz?", answer: "Varianz misst Streuung um den Mittelwert. Beispiel: hohe Gradientenvarianz macht Training instabiler.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was ist eine Normalverteilung?", answer: "Eine Normalverteilung ist glockenförmig und durch Mittelwert und Varianz bestimmt. Beispiel: Initialisierungen oder Rauschannahmen werden oft normal modelliert.", topic: "Wahrscheinlichkeit" },
+        SeedCard { question: "Was ist Maximum Likelihood?", answer: "Maximum Likelihood wählt Parameter, die beobachtete Daten möglichst wahrscheinlich machen. Beispiel: Klassifikationsmodelle maximieren die Wahrscheinlichkeit der richtigen Labels.", topic: "Statistik" },
+        SeedCard { question: "Was ist Entropie?", answer: "Entropie misst Unsicherheit einer Verteilung. Beispiel: [0.5,0.5] hat mehr Entropie als [0.99,0.01].", topic: "Informationstheorie" },
+        SeedCard { question: "Was ist Kreuzentropie?", answer: "Kreuzentropie misst, wie schlecht vorhergesagte Wahrscheinlichkeiten zu Ziel-Labels passen. Beispiel: für Klasse Katze wird -log(p_Katze) minimiert.", topic: "Informationstheorie" },
+        SeedCard { question: "Was ist KL-Divergenz?", answer: "KL-Divergenz misst, wie stark eine Verteilung Q von P abweicht. Beispiel: Distillation kann Student- und Teacher-Verteilungen angleichen.", topic: "Informationstheorie" },
+        SeedCard { question: "Was ist Softmax?", answer: "Softmax wandelt Logits in Wahrscheinlichkeiten, die sich zu 1 summieren. Beispiel: Logits [2,1] werden zu Klassenwahrscheinlichkeiten.", topic: "Funktionen" },
+        SeedCard { question: "Was ist Log-Likelihood?", answer: "Log-Likelihood ist der Logarithmus der Wahrscheinlichkeit der Daten unter dem Modell. Beispiel: statt Produkte vieler Wahrscheinlichkeiten summiert man Logs numerisch stabil.", topic: "Statistik" },
+        SeedCard { question: "Was ist ein Bias-Variance-Tradeoff?", answer: "Bias ist systematischer Fehler, Varianz Empfindlichkeit gegenüber Daten. Beispiel: ein zu simples Modell hat hohen Bias, ein zu komplexes oft hohe Varianz.", topic: "Statistik" },
+        SeedCard { question: "Was ist eine Metrik?", answer: "Eine Metrik misst Abstand und erfüllt Nichtnegativität, Symmetrie und Dreiecksungleichung. Beispiel: euklidischer Abstand zwischen Embeddings.", topic: "Geometrie" },
+        SeedCard { question: "Was ist ein Graph?", answer: "Ein Graph besteht aus Knoten und Kanten. Beispiel: in Graph Neural Networks sind Molekülatome Knoten und chemische Bindungen Kanten.", topic: "Graphen" },
+        SeedCard { question: "Was ist ein Laplace-Operator auf Graphen?", answer: "Der Graph-Laplacian beschreibt Nachbarschaftsstruktur und Glättung auf Graphen. Beispiel: GNNs nutzen Nachbarschaftsaggregation, die eng mit Laplacian-Ideen verwandt ist.", topic: "Graphen" },
+        SeedCard { question: "Was ist Big-O-Notation?", answer: "Big-O beschreibt asymptotisches Wachstum von Rechenaufwand. Beispiel: Self-Attention ist in der Sequenzlänge oft O(n²), weil alle Tokenpaare verglichen werden.", topic: "Diskrete Mathematik" },
+    ]
 }
 
 fn demo_workspace() -> Workspace {

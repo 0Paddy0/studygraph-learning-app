@@ -694,7 +694,7 @@ export function App() {
 
   function generateCardsPreview() {
     setError(null);
-    const cards = mockGenerateCards(generatorInput);
+    const cards = generateLocalCards(generatorInput);
     setGeneratedCards(cards);
     setGeneratorStatus(
       cards.length > 0
@@ -806,7 +806,7 @@ export function App() {
     };
 
     setGeneratorInput(nextInput);
-    const cards = mockGenerateCards(nextInput);
+    const cards = generateLocalCards(nextInput);
     setGeneratedCards(cards);
     setGeneratorStatus(
       cards.length > 0
@@ -1555,7 +1555,7 @@ function DocView({
             onChange={(event) => onDeckOptionsChange({ vocabularyDeck: event.target.value })}
           />
           <button className="primary" onClick={() => onGenerateDeck(selectedPage)}>Parse Doc Text</button>
-          <small>Offline stub: prepares local preview cards in Generate Cards. No paid API call.</small>
+          <small>Offline parser: extracts preview cards in Generate Cards. No paid API call.</small>
         </div>
       </aside>
 
@@ -3056,18 +3056,18 @@ function SettingsView({
     }
   }
 
-  function connectOpenAiAccountStub() {
-    const email = window.prompt("OpenAI/GPT account email (stub only)", settings.openAiAccountEmail || "");
+  function selectOpenAiAccountMode() {
+    const email = window.prompt("Optional account email label (no OAuth happens in this local build)", settings.openAiAccountEmail || "");
     if (email === null) return;
     onSettingsChange({
       apiProviderEnabled: true,
       openAiConnectionMode: "account",
-      openAiAccountEmail: email,
-      openAiAccountStatus: "stub-connected",
+      openAiAccountEmail: email.trim(),
+      openAiAccountStatus: "oauth-not-configured",
     });
   }
 
-  function saveApiKeyStub() {
+  function saveApiKeyMetadata() {
     const trimmed = apiKeyDraft.trim();
     if (!trimmed) {
       onSettingsChange({
@@ -3081,6 +3081,7 @@ function SettingsView({
     onSettingsChange({
       apiProviderEnabled: true,
       openAiConnectionMode: "apiKey",
+      openAiAccountStatus: "api-key-metadata-only",
       openAiApiKeyConfigured: true,
       openAiApiKeyLastFour: trimmed.slice(-4),
     });
@@ -3133,7 +3134,7 @@ function SettingsView({
 
         <article className="settings-panel">
           <h2>GPT / OpenAI Connection</h2>
-          <p className="settings-note">Preferred path: connect a GPT/OpenAI account. API keys are a fallback and may create extra usage costs.</p>
+          <p className="settings-note">Provider settings are explicit and local. The card generator stays offline until a secure API/OAuth implementation exists.</p>
           <label className="toggle-row">
             <input
               type="checkbox"
@@ -3149,14 +3150,15 @@ function SettingsView({
               onChange={(event) => onSettingsChange({ openAiConnectionMode: event.target.value as AppSettings["openAiConnectionMode"] })}
             >
               <option value="none">Not connected</option>
-              <option value="account">GPT/OpenAI account (preferred)</option>
+              <option value="account">GPT/OpenAI account (OAuth not available locally)</option>
               <option value="apiKey">API key fallback</option>
             </select>
           </label>
           <div className="button-row">
-            <button className="primary" onClick={connectOpenAiAccountStub}>Connect GPT/OpenAI Account</button>
+            <button className="primary" onClick={selectOpenAiAccountMode}>Select Account Mode</button>
             <button
               onClick={() => onSettingsChange({
+                apiProviderEnabled: false,
                 openAiConnectionMode: "none",
                 openAiAccountStatus: "not-connected",
                 openAiAccountEmail: "",
@@ -3164,7 +3166,7 @@ function SettingsView({
                 openAiApiKeyLastFour: "",
               })}
             >
-              Disconnect Stub
+              Disconnect
             </button>
           </div>
           <div className="debug-stats">
@@ -3173,7 +3175,7 @@ function SettingsView({
             <span>API key: {settings.openAiApiKeyConfigured ? `configured (*${settings.openAiApiKeyLastFour})` : "not stored"}</span>
           </div>
           <label>
-            API key fallback (stored as stub metadata only)
+            API key fallback (not stored; only last four characters are remembered)
             <input
               type="password"
               value={apiKeyDraft}
@@ -3182,11 +3184,11 @@ function SettingsView({
             />
           </label>
           <div className="button-row">
-            <button onClick={saveApiKeyStub}>Save API Key Stub</button>
+            <button onClick={saveApiKeyMetadata}>Remember API Key Metadata</button>
             <button onClick={() => {
               setApiKeyDraft("");
               onSettingsChange({ openAiApiKeyConfigured: false, openAiApiKeyLastFour: "" });
-            }}>Clear API Key Stub</button>
+            }}>Clear API Key Metadata</button>
           </div>
           <label>
             API base URL
@@ -3196,7 +3198,7 @@ function SettingsView({
             Model
             <input value={settings.apiModel} onChange={(event) => onSettingsChange({ apiModel: event.target.value })} />
           </label>
-          <p className="settings-note">The current generator remains offline. These controls only persist connection intent; no OAuth, API key validation, or paid request is made.</p>
+          <p className="settings-note">No OAuth flow, API-key validation, external request, or paid API call is performed. Use a system keychain or environment-based backend before enabling real requests.</p>
         </article>
       </div>
 
@@ -3462,9 +3464,10 @@ function CommandPalette({
   );
 }
 
-function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
+function generateLocalCards(input: CardGeneratorInput): GeneratedCard[] {
   const sentences = splitSourceSentences(input.source_text);
-  if (sentences.length === 0) {
+  const definitionFacts = extractDefinitionFacts(input.source_text);
+  if (sentences.length === 0 && definitionFacts.length === 0) {
     return [];
   }
 
@@ -3473,8 +3476,19 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
   const topic = singleLine(input.topic, "General");
   const vocabularyDeck = singleLine(input.vocabulary_deck, `${deck} Vocabulary`);
   const limit = clampNumber(input.number_of_cards, 1, 30);
+  const directCards = definitionFacts.slice(0, limit).map((fact) => ({
+    question: fact.question || (language === "de" ? `Was bedeutet "${fact.term}" im Kontext ${topic}?` : `What does "${fact.term}" mean in the context of ${topic}?`),
+    answer: fact.answer,
+    deck,
+    topic,
+    tags: ["generated", input.difficulty, "definition"],
+    source_summary: shorten(fact.answer, 120),
+  } satisfies GeneratedCard));
+  const directSources = new Set(definitionFacts.map((fact) => fact.source));
+  const remainingSentences = sentences.filter((sentence) => !directSources.has(sentence));
+  const remainingLimit = Math.max(0, limit - directCards.length);
 
-  const baseCards = sentences.slice(0, limit).map((sentence, index) => {
+  const sentenceCards = remainingSentences.slice(0, remainingLimit).map((sentence, index) => {
     const term = pickKeyTerm(sentence, topic);
     const style = input.card_style === "mixed" ? (index % 3 === 1 ? "cloze" : "basic") : input.card_style;
     const promptPrefix =
@@ -3507,6 +3521,7 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
       source_summary: shorten(sentence, 120),
     } satisfies GeneratedCard;
   });
+  const baseCards = [...directCards, ...sentenceCards];
 
   const bidirectionalCards = input.bidirectional_cards
     ? baseCards.map((card) => ({
@@ -3514,13 +3529,13 @@ function mockGenerateCards(input: CardGeneratorInput): GeneratedCard[] {
         answer: card.question,
         deck: card.deck,
         topic: card.topic,
-        tags: [...card.tags.filter((tag) => tag !== "basic" && tag !== "cloze"), "bidirectional"],
+        tags: [...card.tags.filter((tag) => !["basic", "cloze", "definition"].includes(tag)), "bidirectional"],
         source_summary: card.source_summary,
       } satisfies GeneratedCard))
     : [];
 
   const vocabularyCards = input.vocabulary_mode
-    ? extractVocabularyTerms(sentences, topic).slice(0, Math.min(limit, 12)).map(({ term, sentence }) => ({
+    ? extractVocabularyTerms([...definitionFacts.map((fact) => `${fact.term}: ${fact.answer}`), ...sentences], topic).slice(0, Math.min(limit, 12)).map(({ term, sentence }) => ({
         question: language === "de" ? `Was bedeutet "${term}" in diesem Text?` : `What does "${term}" mean in this text?`,
         answer: language === "de" ? `Kontext: ${sentence}` : `Context: ${sentence}`,
         deck: vocabularyDeck,
@@ -3727,12 +3742,100 @@ function saveFallbackAppSettings(settings: AppSettings) {
   }
 }
 
+interface DefinitionFact {
+  term: string;
+  answer: string;
+  source: string;
+  question?: string;
+}
+
 function splitSourceSentences(value: string) {
-  return value
-    .replace(/\r/g, "")
-    .split(/(?:[.!?]+|\n+)/)
-    .map((part) => singleLine(part, ""))
-    .filter((part) => part.length >= 12);
+  const seen = new Set<string>();
+  const chunks: string[] = [];
+  for (const rawLine of value.replace(/\r/g, "").split(/\n+/)) {
+    const cleanLine = cleanSourceLine(rawLine);
+    if (!cleanLine) continue;
+    const parts = cleanLine.length > 220
+      ? cleanLine.split(/(?<=[.!?])\s+/)
+      : [cleanLine];
+    for (const part of parts) {
+      const cleanPart = singleLine(part.replace(/[.!?]+$/, ""), "");
+      const key = cleanPart.toLocaleLowerCase();
+      if (cleanPart.length >= 8 && !seen.has(key)) {
+        seen.add(key);
+        chunks.push(cleanPart);
+      }
+    }
+  }
+  return chunks;
+}
+
+function extractDefinitionFacts(value: string): DefinitionFact[] {
+  const lines = value.replace(/\r/g, "").split(/\n+/).map(cleanSourceLine).filter(Boolean);
+  const facts: DefinitionFact[] = [];
+  const seen = new Set<string>();
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    const next = lines[index + 1] ?? "";
+    const qaMatch = line.match(/^(?:q|frage|question)\s*[:?]\s*(.+)$/i);
+    const answerMatch = next.match(/^(?:a|antwort|answer)\s*[:\-]\s*(.+)$/i);
+    if (qaMatch && answerMatch) {
+      addDefinitionFact(facts, seen, {
+        term: pickKeyTerm(qaMatch[1], ""),
+        question: singleLine(qaMatch[1], "Generated question"),
+        answer: singleLine(answerMatch[1], "Generated answer"),
+        source: line,
+      });
+      index += 1;
+      continue;
+    }
+
+    const arrowMatch = line.match(/^(.{2,80}?)\s*(?:=>|->|—|–)\s*(.{8,})$/);
+    if (arrowMatch) {
+      addDefinitionFact(facts, seen, {
+        term: cleanTerm(arrowMatch[1]),
+        answer: singleLine(arrowMatch[2], "Generated answer"),
+        source: line,
+      });
+      continue;
+    }
+
+    const colonMatch = line.match(/^([^:]{2,70}):\s*(.{8,})$/);
+    if (colonMatch && !/^(sgd-|deck|topic|card)\b/i.test(colonMatch[1])) {
+      addDefinitionFact(facts, seen, {
+        term: cleanTerm(colonMatch[1]),
+        answer: singleLine(colonMatch[2], "Generated answer"),
+        source: line,
+      });
+    }
+  }
+
+  return facts;
+}
+
+function cleanSourceLine(value: string) {
+  const trimmed = value
+    .trim()
+    .replace(/^#{1,6}\s+/, "")
+    .replace(/^[-*+]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .replace(/^TODO\s+/i, "");
+  if (!trimmed || /^(sgd-|deck|topic|card)[\w-]*::/i.test(trimmed)) return "";
+  return singleLine(stripPageLinks(trimmed), "");
+}
+
+function cleanTerm(value: string) {
+  return singleLine(value.replace(/^[`*_]+|[`*_]+$/g, ""), "concept").replace(/[.:;,-]+$/, "");
+}
+
+function addDefinitionFact(facts: DefinitionFact[], seen: Set<string>, fact: DefinitionFact) {
+  const term = cleanTerm(fact.term);
+  const answer = singleLine(fact.answer, "");
+  const key = `${term.toLocaleLowerCase()}::${answer.toLocaleLowerCase()}`;
+  if (!term || !answer || seen.has(key)) return;
+  seen.add(key);
+  facts.push({ ...fact, term, answer });
 }
 
 function resolveGeneratorLanguage(language: CardGeneratorInput["language"], sourceText: string): "de" | "en" {
@@ -3855,7 +3958,7 @@ function formatGeneratedCardsAsMarkdown(cards: GeneratedCard[]) {
         `  sgd-deck:: ${singleLine(card.deck, "Generated")}`,
         `  sgd-topic:: ${singleLine(card.topic, "General")}`,
         "  sgd-generated:: true",
-        "  sgd-source:: mock",
+        "  sgd-source:: local-generator",
       ];
       if (card.tags.length > 0) {
         lines.push(`  sgd-tags:: ${card.tags.map((tag) => singleLine(tag, "")).filter(Boolean).join(", ")}`);
@@ -3916,7 +4019,7 @@ function buildDebugReport({
     `OpenAI mode: ${settings.openAiConnectionMode}`,
     `OpenAI account status: ${settings.openAiAccountStatus}`,
     `OpenAI account email set: ${settings.openAiAccountEmail ? "yes" : "no"}`,
-    `API key stub configured: ${settings.openAiApiKeyConfigured ? `yes (*${settings.openAiApiKeyLastFour})` : "no"}`,
+    `API key metadata configured: ${settings.openAiApiKeyConfigured ? `yes (*${settings.openAiApiKeyLastFour})` : "no"}`,
     `API base URL set: ${settings.apiBaseUrl.trim() ? "yes" : "no"}`,
     `API model: ${settings.apiModel || "not set"}`,
     `Debug mode: ${settings.debugMode}`,
@@ -4271,7 +4374,7 @@ function buildSearchResults(snapshot: DesktopSnapshot | null, query: string): Se
     commandResult("review", "Start Due Review", "Open review flow for due cards"),
     commandResult("practice", "Start Free Practice", "Practice cards without changing SRS by default"),
     commandResult("graph", "Open Study Graph", "Show graph-based learning view"),
-    commandResult("generate", "Generate Cards", "Create local mock cards from source text"),
+    commandResult("generate", "Generate Cards", "Create local parser cards from source text"),
     commandResult("settings", "Open Settings and Debug", "Show SQLite settings, storage paths, and debug report"),
     commandResult("import", "Import Markdown", "Import Markdown text, file, or folder"),
     commandResult("export", "Export Markdown", "Preview or export Markdown files"),
