@@ -15,10 +15,25 @@ This is the shared Tauri + React desktop application for Windows and Linux.
 
 ```bash
 npm install
+npm test
 npm run build
+npm run smoke:tauri
 npm run tauri:dev
 npm run tauri -- build --debug
 ```
+
+## Local Tauri UI Smoke Test
+
+`npm run smoke:tauri` runs the frontend unit tests, production build, and `cargo test -p studygraph_core`, then prints the manual UI checklist. Set `RUN_TAURI_DEV=1` to launch the interactive Tauri window as the final step.
+
+On Ubuntu 24.04/Linux, Tauri needs the WebKit/GTK dev stack before the UI can launch:
+
+```bash
+sudo apt update
+sudo apt install -y libwebkit2gtk-4.1-dev libjavascriptcoregtk-4.1-dev libsoup-3.0-dev libgtk-3-dev libayatana-appindicator3-dev librsvg2-dev
+```
+
+Manual UI pass criteria: the app opens, sidebar renders, dashboard counts load, notes/todo/graph tabs switch, and no browser console or Rust terminal errors appear.
 
 ## Current MVP Behavior
 

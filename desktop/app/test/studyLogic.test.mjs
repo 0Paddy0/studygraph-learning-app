@@ -1,0 +1,143 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import {
+  buildReviewQueue,
+  buildTodoItems,
+  clozeAnswerMatches,
+  evaluateClozeAnswers,
+  filterGraphForView,
+  summarizeTodoMetrics,
+  todoLearningTarget,
+} from "../.test-dist/studyLogic.js";
+
+const now = Date.now();
+const iso = (offsetMs) => new Date(now + offsetMs).toISOString();
+
+function card(overrides = {}) {
+  const id = overrides.id ?? "card-1";
+  return {
+    id,
+    block_id: overrides.block_id ?? `block-${id}`,
+    question: overrides.question ?? `Question ${id}`,
+    answer_markdown: overrides.answer_markdown ?? "Answer",
+    deck: overrides.deck ?? "German",
+    deck_slug: overrides.deck_slug ?? "german",
+    topic: overrides.topic ?? "Basics",
+    topic_slug: overrides.topic_slug ?? "basics",
+    source_page: overrides.source_page ?? "German",
+    linked_pages: overrides.linked_pages ?? [],
+    tags: overrides.tags ?? [],
+    raw_content: overrides.raw_content ?? "",
+    properties: overrides.properties ?? {},
+    incomplete: false,
+    srs: {
+      state: "review",
+      due_at: iso(-60_000),
+      interval_days: 3,
+      ease: 2.2,
+      reps: 3,
+      lapses: 0,
+      last_reviewed_at: iso(-86_400_000),
+      last_rating: "good",
+      hard_count: 0,
+      created_at: iso(-604_800_000),
+      ...(overrides.srs ?? {}),
+    },
+    ...overrides,
+  };
+}
+
+const settings = {
+  defaultDeck: "Default",
+  defaultTopic: "General",
+  newCardsPerDay: 1,
+  reviewsPerDay: 10,
+  apiProviderEnabled: false,
+  apiBaseUrl: "",
+  apiModel: "",
+  openAiConnectionMode: "none",
+  openAiAccountEmail: "",
+  openAiAccountStatus: "not connected",
+  openAiApiKeyConfigured: false,
+  openAiApiKeyLastFour: "",
+  debugMode: false,
+};
+
+test("review queue prioritizes next-up cards, excludes done cards, and limits new cards", () => {
+  const nextUp = card({ id: "next", properties: { "sgd-todo": "doing" }, srs: { due_at: iso(86_400_000), reps: 5 } });
+  const overdue = card({ id: "overdue", question: "A overdue", srs: { due_at: iso(-86_400_000), reps: 2 } });
+  const weak = card({ id: "weak", question: "B weak", srs: { due_at: iso(-120_000), ease: 1.4, reps: 4 } });
+  const newOne = card({ id: "new-1", question: "C new 1", srs: { due_at: null, reps: 0, state: "new" } });
+  const newTwo = card({ id: "new-2", question: "D new 2", srs: { due_at: null, reps: 0, state: "new" } });
+  const done = card({ id: "done", properties: { "sgd-todo": "done" } });
+
+  const queue = buildReviewQueue([newTwo, done, weak, newOne, overdue, nextUp], null, settings);
+
+  assert.deepEqual(queue.map((item) => item.id), ["next", "overdue", "weak", "new-1"]);
+});
+
+test("cloze evaluation accepts umlaut variants and suggests ratings by completion", () => {
+  assert.equal(clozeAnswerMatches("kaese", "Käse").correct, true);
+  assert.equal(clozeAnswerMatches("recursion", "recursoin").correct, true);
+  assert.equal(clozeAnswerMatches("", "Käse").kind, "empty");
+
+  const incomplete = evaluateClozeAnswers(["Käse", "Apfel"], ["kaese", ""]);
+  assert.equal(incomplete.suggestedRating, "again");
+  assert.equal(incomplete.filledCount, 1);
+
+  const mostlyCorrect = evaluateClozeAnswers(["one", "two", "three", "four"], ["one", "two", "three", "nope"]);
+  assert.equal(mostlyCorrect.suggestedRating, "good");
+});
+
+test("todo items infer learning targets from linked source pages and route to review", () => {
+  const page = {
+    id: "plan",
+    name: "Plan",
+    properties: {},
+    blocks: [{ id: "todo-1", content: "TODO Review [[German]] basics", properties: { "sgd-todo": "open" }, children: [] }],
+  };
+  const dueCard = card({ id: "linked", block_id: "card-block", source_page: "German", deck: "German", deck_slug: "german", topic: "Basics", topic_slug: "basics" });
+
+  const items = buildTodoItems([page], [dueCard]);
+  const explicit = items.find((item) => item.id === "todo-1");
+
+  assert.ok(explicit, "explicit TODO block should become a todo item");
+  assert.equal(explicit.targetKind, "topic");
+  assert.equal(explicit.learningNodeId, "topic:german:basics");
+  assert.equal(explicit.metrics.dueCards, 1);
+  assert.equal(todoLearningTarget(explicit, [dueCard], settings).kind, "review");
+
+  const summary = summarizeTodoMetrics(items.filter((item) => item.status !== "done"));
+  assert.equal(summary.dueCards >= 1, true);
+});
+
+test("graph filters keep only matching deck/status cards and connected parents", () => {
+  const dueGerman = card({ id: "due-german", deck: "German", deck_slug: "german", topic: "Basics", topic_slug: "basics" });
+  const futureGerman = card({ id: "future-german", deck: "German", deck_slug: "german", topic: "Basics", topic_slug: "basics", srs: { due_at: iso(86_400_000), reps: 5 } });
+  const dueMath = card({ id: "due-math", deck: "Math", deck_slug: "math", topic: "Algebra", topic_slug: "algebra" });
+  const snapshot = {
+    workspace: { id: "workspace", name: "Workspace", pages: [] },
+    cards: [dueGerman, futureGerman, dueMath],
+    backlinks: [],
+    graph: {
+      nodes: [
+        { id: "deck:german", kind: "deck", label: "German", total_cards: 2, due_cards: 1, weak_cards: 0 },
+        { id: "topic:german:basics", kind: "topic", label: "Basics", total_cards: 2, due_cards: 1, weak_cards: 0 },
+        { id: "card:due-german", kind: "card", label: "Due German", total_cards: 1, due_cards: 1, weak_cards: 0 },
+        { id: "card:future-german", kind: "card", label: "Future German", total_cards: 1, due_cards: 0, weak_cards: 0 },
+        { id: "deck:math", kind: "deck", label: "Math", total_cards: 1, due_cards: 1, weak_cards: 0 },
+        { id: "card:due-math", kind: "card", label: "Due Math", total_cards: 1, due_cards: 1, weak_cards: 0 },
+      ],
+      edges: [
+        { id: "german-topic", source: "deck:german", target: "topic:german:basics", kind: "contains" },
+        { id: "german-due", source: "topic:german:basics", target: "card:due-german", kind: "contains" },
+        { id: "german-future", source: "topic:german:basics", target: "card:future-german", kind: "contains" },
+        { id: "math-due", source: "deck:math", target: "card:due-math", kind: "contains" },
+      ],
+    },
+  };
+
+  const filtered = filterGraphForView(snapshot, "due", "german");
+  assert.deepEqual(filtered.nodes.map((node) => node.id).sort(), ["card:due-german", "concept:overdue-cards", "deck:german", "topic:german:basics"]);
+  assert.deepEqual(filtered.edges.map((edge) => edge.id).sort(), ["Related:concept:overdue-cards:card:due-german", "german-due", "german-topic"]);
+});
