@@ -107,6 +107,16 @@ interface SessionAnswerStat {
   responseTimeMs?: number;
 }
 
+interface StoredSessionSummary {
+  id: string;
+  kind: "review" | "practice";
+  completedAt: string;
+  scopeLabel: string;
+  answered: number;
+  averageResponseTimeMs?: number;
+  counts: Record<Rating, number>;
+}
+
 const sampleImport = `# Ungarisch Mini
 sgd-deck:: Ungarisch Deutsch
 
@@ -144,6 +154,7 @@ export function App() {
   const [practiceStartedAt, setPracticeStartedAt] = useState(() => Date.now());
   const [practiceResponseTimeMs, setPracticeResponseTimeMs] = useState<number | undefined>();
   const [practiceSessionStats, setPracticeSessionStats] = useState<SessionAnswerStat[]>([]);
+  const [sessionSummaries, setSessionSummaries] = useState<StoredSessionSummary[]>(() => loadStoredSessionSummaries());
   const [practiceRecordRatings, setPracticeRecordRatings] = useState(false);
   const [selectedNode, setSelectedNode] = useState<StudyGraphNode | null>(null);
   const [pageName, setPageName] = useState("Imported Page");
@@ -896,6 +907,7 @@ export function App() {
     setReviewScopeLabel(label);
     setSelectedCardIndex(0);
     setShowAnswer(false);
+    setReviewSessionStats([]);
     setScreen("review");
   }
 
@@ -906,6 +918,7 @@ export function App() {
     setPracticeScopeLabel(label);
     setPracticeIndex(0);
     setPracticeShowAnswer(false);
+    setPracticeSessionStats([]);
     setScreen("practice");
   }
 
@@ -994,7 +1007,7 @@ export function App() {
   const todoItems = useMemo(() => buildTodoItems(pages, cards), [pages, cards]);
   const decks = useMemo(() => groupCardsByDeck(cards), [cards]);
   const allDueCards = useMemo(() => cards.filter(isDue), [cards]);
-  const dueCards = useMemo(() => buildReviewQueue(cards, reviewNodeId), [cards, reviewNodeId]);
+  const dueCards = useMemo(() => buildReviewQueue(cards, reviewNodeId, settings), [cards, reviewNodeId, settings]);
   const practiceQueue = useMemo(
     () => buildPracticeQueue(cards, practiceMode, practiceDeckSlug, practiceNodeId),
     [cards, practiceMode, practiceDeckSlug, practiceNodeId],
@@ -1011,6 +1024,18 @@ export function App() {
     setPracticeStartedAt(Date.now());
     setPracticeResponseTimeMs(undefined);
   }, [currentPracticeCard?.id]);
+
+  useEffect(() => {
+    if (reviewSessionStats.length === 0) return;
+    const summary = buildStoredSessionSummary("review", reviewScopeLabel, reviewSessionStats);
+    setSessionSummaries((current) => saveStoredSessionSummaries(upsertSessionSummary(current, summary)));
+  }, [reviewSessionStats, reviewScopeLabel]);
+
+  useEffect(() => {
+    if (practiceSessionStats.length === 0) return;
+    const summary = buildStoredSessionSummary("practice", practiceScopeLabel, practiceSessionStats);
+    setSessionSummaries((current) => saveStoredSessionSummaries(upsertSessionSummary(current, summary)));
+  }, [practiceSessionStats, practiceScopeLabel]);
 
   const selectedDocPage = docPages.find((page) => page.id === selectedDocPageId) ?? docPages[0];
 
@@ -1222,6 +1247,7 @@ export function App() {
             onStudyModeChange={setStudyMode}
             responseTimeMs={reviewResponseTimeMs}
             sessionStats={reviewSessionStats}
+            recentSummaries={sessionSummaries}
             onShowAnswer={revealReviewAnswer}
             onSkip={() => {
               setShowAnswer(false);
@@ -1247,6 +1273,7 @@ export function App() {
             onStudyModeChange={setPracticeStudyMode}
             responseTimeMs={practiceResponseTimeMs}
             sessionStats={practiceSessionStats}
+            recentSummaries={sessionSummaries}
             recordRatings={practiceRecordRatings}
             onModeChange={(mode) => {
               setPracticeMode(mode);
@@ -2630,6 +2657,21 @@ function ClozeAnswer({ card, onRate }: { card: StudyCard; onRate?: (rating: Rati
   );
 }
 
+function RecentSessionSummaries({ summaries }: { summaries: StoredSessionSummary[] }) {
+  const recent = summaries.slice(0, 3);
+  if (recent.length === 0) return null;
+  return (
+    <aside className="study-session-summary recent-session-summary">
+      {recent.map((summary) => (
+        <span key={summary.id}>
+          {summary.kind} · {summary.scopeLabel} · {summary.answered} cards
+          {summary.averageResponseTimeMs !== undefined ? ` · Ø ${formatDurationMs(summary.averageResponseTimeMs)}` : ""}
+        </span>
+      ))}
+    </aside>
+  );
+}
+
 function SessionStatsPanel({
   stats,
   currentResponseTimeMs,
@@ -2677,6 +2719,7 @@ function ReviewView({
   onStudyModeChange,
   responseTimeMs,
   sessionStats,
+  recentSummaries,
   onShowAnswer,
   onSkip,
   onRate,
@@ -2691,6 +2734,7 @@ function ReviewView({
   onStudyModeChange: (mode: StudyMode) => void;
   responseTimeMs?: number;
   sessionStats: SessionAnswerStat[];
+  recentSummaries: StoredSessionSummary[];
   onShowAnswer: () => void;
   onSkip: () => void;
   onRate: (rating: Rating) => void;
@@ -2751,6 +2795,7 @@ function ReviewView({
       </div>
       <StudyModeToggle mode={studyMode} onChange={onStudyModeChange} />
       <SessionStatsPanel stats={sessionStats} currentResponseTimeMs={showAnswer ? responseTimeMs : undefined} />
+      <RecentSessionSummaries summaries={recentSummaries} />
       <article className="review-card">
         <h2>{card.question}</h2>
         <CardStudyMeta card={card} />
@@ -2801,6 +2846,7 @@ function FreePracticeView({
   onStudyModeChange,
   responseTimeMs,
   sessionStats,
+  recentSummaries,
   recordRatings,
   onModeChange,
   onDeckChange,
@@ -2823,6 +2869,7 @@ function FreePracticeView({
   onStudyModeChange: (mode: StudyMode) => void;
   responseTimeMs?: number;
   sessionStats: SessionAnswerStat[];
+  recentSummaries: StoredSessionSummary[];
   recordRatings: boolean;
   onModeChange: (mode: PracticeMode) => void;
   onDeckChange: (deckSlug: string) => void;
@@ -2916,6 +2963,7 @@ function FreePracticeView({
         {!recordRatings && <strong>Practice-only: SRS unchanged</strong>}
       </div>
       {recordRatings && <SessionStatsPanel stats={sessionStats} currentResponseTimeMs={showAnswer ? responseTimeMs : undefined} />}
+      <RecentSessionSummaries summaries={recentSummaries} />
 
       {!card ? (
         <section className="empty">No cards match this practice filter.</section>
@@ -3868,6 +3916,52 @@ function filterDocPages(pages: DocPage[], query: string) {
   });
 }
 
+function loadStoredSessionSummaries(): StoredSessionSummary[] {
+  try {
+    const raw = window.localStorage.getItem("studygraph.sessionSummaries");
+    if (!raw) return [];
+    return (JSON.parse(raw) as StoredSessionSummary[]).slice(0, 20);
+  } catch {
+    return [];
+  }
+}
+
+function saveStoredSessionSummaries(summaries: StoredSessionSummary[]) {
+  const next = summaries.slice(0, 20);
+  try {
+    window.localStorage.setItem("studygraph.sessionSummaries", JSON.stringify(next));
+  } catch {
+    // Session summaries are a convenience cache; ignore localStorage failures.
+  }
+  return next;
+}
+
+function upsertSessionSummary(current: StoredSessionSummary[], summary: StoredSessionSummary) {
+  return [summary, ...current.filter((candidate) => candidate.id !== summary.id)].slice(0, 20);
+}
+
+function buildStoredSessionSummary(
+  kind: StoredSessionSummary["kind"],
+  scopeLabel: string,
+  stats: SessionAnswerStat[],
+): StoredSessionSummary {
+  const timed = stats.filter((stat) => typeof stat.responseTimeMs === "number");
+  return {
+    id: `${kind}:${scopeLabel}`,
+    kind,
+    completedAt: new Date().toISOString(),
+    scopeLabel,
+    answered: stats.length,
+    averageResponseTimeMs: timed.length > 0
+      ? timed.reduce((sum, stat) => sum + (stat.responseTimeMs ?? 0), 0) / timed.length
+      : undefined,
+    counts: stats.reduce<Record<Rating, number>>((acc, stat) => {
+      acc[stat.rating] += 1;
+      return acc;
+    }, { again: 0, hard: 0, good: 0, easy: 0 }),
+  };
+}
+
 function evaluateClozeAnswers(blanks: string[], answers: string[]) {
   const results = blanks.map((blank, index) => {
     const answer = answers[index] ?? "";
@@ -3909,14 +4003,14 @@ function buildClozePrompt(card: StudyCard) {
   const words = Array.from(text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}-]{3,}/gu));
   const unique = new Set<string>();
   const candidates = words
-    .map((match) => ({ value: match[0], index: match.index ?? 0 }))
+    .map((match) => ({ value: match[0], index: match.index ?? 0, score: clozeWordScore(match[0], text, card) }))
     .filter((word) => {
       const normalized = normalizeAnswer(word.value);
-      if (unique.has(normalized) || commonClozeWords.has(normalized)) return false;
+      if (unique.has(normalized) || commonClozeWords.has(normalized) || word.score <= 0) return false;
       unique.add(normalized);
       return true;
     })
-    .sort((left, right) => right.value.length - left.value.length);
+    .sort((left, right) => right.score - left.score || right.value.length - left.value.length);
   const strength = Math.max(card.srs.reps, Math.round(card.srs.ease));
   const blankCount = Math.min(Math.max(1, Math.floor(strength / 2)), 6, candidates.length);
   const selected = candidates.slice(0, blankCount).sort((left, right) => left.index - right.index);
@@ -3931,6 +4025,19 @@ function buildClozePrompt(card: StudyCard) {
   }
   parts.push({ kind: "text", value: text.slice(cursor) });
   return { text, parts, blanks };
+}
+
+function clozeWordScore(word: string, fullText: string, card: StudyCard) {
+  const normalized = normalizeAnswer(word);
+  if (normalized.length < 4) return 0;
+  let score = normalized.length;
+  if (/^[A-ZÄÖÜ]/.test(word)) score += 4;
+  if (card.question.toLowerCase().includes(word.toLowerCase())) score += 3;
+  if (card.tags.some((tag) => normalizeAnswer(tag) === normalized)) score += 5;
+  if (card.linked_pages.some((page) => normalizeAnswer(page).includes(normalized))) score += 5;
+  const occurrences = fullText.match(new RegExp(`\\b${escapeRegExp(word)}\\b`, "gi"))?.length ?? 0;
+  if (occurrences > 1) score -= occurrences;
+  return score;
 }
 
 function normalizeAnswer(value: string) {
@@ -4360,17 +4467,19 @@ function groupCardsByDeck(cards: StudyCard[]) {
   }));
 }
 
-function buildReviewQueue(cards: StudyCard[], nodeId: string | null) {
+function buildReviewQueue(cards: StudyCard[], nodeId: string | null, settings: AppSettings) {
   const scopedCards = nodeId ? cardsForGraphNode(cards, nodeId) : cards;
-  const nextUpCards = scopedCards.filter((card) => todoStatusForCard(card) === "doing");
-  if (nextUpCards.length > 0) {
-    return nextUpCards.sort(sortReviewCards);
-  }
-
-  return scopedCards
-    .filter((card) => todoStatusForCard(card) !== "done")
-    .filter(isDue)
-    .sort(sortReviewCards);
+  const activeCards = scopedCards.filter((card) => todoStatusForCard(card) !== "done");
+  const nextUpCards = activeCards.filter((card) => todoStatusForCard(card) === "doing").sort(sortReviewCards);
+  const overdueCards = activeCards.filter((card) => isDue(card) && !isNewCard(card)).sort(sortReviewCards);
+  const weakCards = activeCards.filter((card) => isDue(card) && isWeak(card)).sort(sortReviewCards);
+  const newCards = activeCards.filter((card) => isDue(card) && isNewCard(card)).sort(sortReviewCards);
+  return uniqueCards([
+    ...nextUpCards,
+    ...overdueCards,
+    ...weakCards,
+    ...newCards.slice(0, settings.newCardsPerDay),
+  ]).slice(0, settings.reviewsPerDay);
 }
 
 function buildPracticeQueue(cards: StudyCard[], mode: PracticeMode, deckSlug: string, nodeId: string) {
@@ -4435,6 +4544,15 @@ function cardsForGraphNode(cards: StudyCard[], nodeId: string) {
   }
 
   return [];
+}
+
+function uniqueCards(cards: StudyCard[]) {
+  const seen = new Set<string>();
+  return cards.filter((card) => {
+    if (seen.has(card.id)) return false;
+    seen.add(card.id);
+    return true;
+  });
 }
 
 function sortReviewCards(left: StudyCard, right: StudyCard) {
