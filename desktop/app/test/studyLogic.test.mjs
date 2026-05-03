@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildPriorityContext,
+  buildPracticeQueue,
   buildReviewQueue,
   buildTodoItems,
   cardsForGraphNode,
@@ -76,7 +78,7 @@ test("review queue prioritizes next-up cards, excludes done cards, and limits ne
 
   const queue = buildReviewQueue([newTwo, done, weak, newOne, overdue, nextUp], null, settings);
 
-  assert.deepEqual(queue.map((item) => item.id), ["next", "overdue", "weak", "new-1"]);
+  assert.deepEqual(queue.map((item) => item.id), ["next", "weak", "overdue", "new-1"]);
 });
 
 test("cloze evaluation accepts umlaut variants and suggests ratings by completion", () => {
@@ -199,4 +201,96 @@ test("graph filters keep only matching deck/status cards and connected parents",
   const filtered = filterGraphForView(snapshot, "due", "german");
   assert.deepEqual(filtered.nodes.map((node) => node.id).sort(), ["card:due-german", "concept:overdue-cards", "deck:german", "topic:german:basics"]);
   assert.deepEqual(filtered.edges.map((edge) => edge.id).sort(), ["Related:concept:overdue-cards:card:due-german", "german-due", "german-topic"]);
+});
+
+test("priority engine explains topic/card pressure from due weakness timing cloze and next-up", () => {
+  const target = card({ id: "target", properties: { "sgd-todo": "doing" }, srs: { due_at: iso(-172_800_000), ease: 1.45, lapses: 2, hard_count: 2, last_rating: "again" } });
+  const session = {
+    id: "session-1",
+    workspaceId: "workspace",
+    kind: "review",
+    scopeLabel: "German",
+    startedAt: iso(-7_200_000),
+    completedAt: iso(-7_000_000),
+    items: [{
+      id: "item-1",
+      sessionId: "session-1",
+      cardId: "target",
+      question: target.question,
+      rating: "again",
+      responseTimeMs: 31_000,
+      clozeResult: { suggestedRating: "again", blanks: [{ expected: "Mercedes", input: "", correct: false }, { expected: "Auto", input: "Auto", correct: true }] },
+      ratingRecommendation: null,
+      ratingOverridden: false,
+      answeredAt: iso(-7_000_000),
+      position: 0,
+    }],
+  };
+
+  const context = buildPriorityContext([target], [session]);
+  const topic = context.topicsByKey.get("german:basics");
+  const priority = context.cardsById.get("target");
+
+  assert.ok(topic.score > 70);
+  assert.ok(priority.score > 80);
+  assert.ok(priority.reasons.some((reason) => reason.includes("Next up")));
+  assert.ok(priority.factors.some((factor) => factor.code === "answer-time" && factor.contribution > 0));
+  assert.ok(priority.factors.some((factor) => factor.code === "cloze-misses" && factor.contribution > 0));
+});
+
+test("priority propagation lifts related topics through shared concepts with decayed weight", () => {
+  const mercedes = card({
+    id: "mercedes",
+    topic: "Mercedes",
+    topic_slug: "mercedes",
+    linked_pages: ["Auto"],
+    tags: ["cars"],
+    srs: { due_at: iso(-86_400_000), ease: 1.35, lapses: 3, hard_count: 3, last_rating: "again" },
+  });
+  const bmw = card({
+    id: "bmw",
+    topic: "BMW",
+    topic_slug: "bmw",
+    linked_pages: ["Auto"],
+    tags: ["cars"],
+    srs: { due_at: iso(86_400_000), ease: 2.4, reps: 4 },
+  });
+  const unrelated = card({
+    id: "grammar",
+    topic: "Grammar",
+    topic_slug: "grammar",
+    linked_pages: ["Cases"],
+    tags: ["grammar"],
+    srs: { due_at: iso(86_400_000), ease: 2.4, reps: 4 },
+  });
+
+  const context = buildPriorityContext([mercedes, bmw, unrelated]);
+  const bmwTopic = context.topicsByKey.get("german:bmw");
+  const unrelatedTopic = context.topicsByKey.get("german:grammar");
+
+  assert.ok(bmwTopic.propagatedScore > 0);
+  assert.ok(bmwTopic.relatedWeaknessHints.some((hint) => hint.includes("Mercedes")));
+  assert.ok(bmwTopic.score > unrelatedTopic.score);
+});
+
+test("review queue interleaves high-priority topics instead of draining one topic", () => {
+  const a1 = card({ id: "a1", topic: "Cars", topic_slug: "cars", question: "A1", srs: { due_at: iso(-86_400_000), ease: 1.4, lapses: 2 } });
+  const a2 = card({ id: "a2", topic: "Cars", topic_slug: "cars", question: "A2", srs: { due_at: iso(-80_000_000), ease: 1.5, lapses: 2 } });
+  const b1 = card({ id: "b1", topic: "Food", topic_slug: "food", question: "B1", srs: { due_at: iso(-70_000_000), ease: 1.6, lapses: 1 } });
+  const b2 = card({ id: "b2", topic: "Food", topic_slug: "food", question: "B2", srs: { due_at: iso(-60_000_000), ease: 1.7, lapses: 1 } });
+
+  const queue = buildReviewQueue([a1, a2, b1, b2], null, { ...settings, reviewsPerDay: 4, newCardsPerDay: 0 });
+  const topics = queue.map((item) => item.topic_slug);
+
+  assert.equal(topics[0] !== topics[1], true);
+  assert.equal(new Set(topics).size, 2);
+});
+
+test("practice queue uses priority order with interleaving", () => {
+  const weak = card({ id: "weak-practice", topic: "Cars", topic_slug: "cars", srs: { due_at: iso(-86_400_000), ease: 1.3, lapses: 2 } });
+  const steady = card({ id: "steady-practice", topic: "Food", topic_slug: "food", srs: { due_at: iso(86_400_000), ease: 2.6, reps: 5 } });
+
+  const queue = buildPracticeQueue([steady, weak], "all", "", "");
+
+  assert.equal(queue[0].id, "weak-practice");
 });

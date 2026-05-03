@@ -54,6 +54,7 @@ import {
   backlinksForPage,
   buildBlockLocations,
   buildPracticeQueue,
+  buildPriorityContext,
   buildReviewQueue,
   buildSearchResults,
   buildTodoItems,
@@ -88,6 +89,8 @@ import {
   normalizeSlug,
   nodeRadius,
   pageNameFromFilePath,
+  priorityReasonSummary,
+  priorityScoreLabel,
   ratingLabel,
   ratingWasManuallyOverridden,
   recommendRating,
@@ -129,6 +132,7 @@ import type {
   StudyGraphNode,
   WorkspaceExport,
 } from "./types";
+import type { CardPriority, PriorityContext, TopicPriority } from "./studyLogic";
 
 type Screen = "notes" | "doc" | "todo" | "dashboard" | "review" | "practice" | "graph" | "generate" | "settings" | "import" | "export";
 type PracticeMode = "all" | "deck" | "weak" | "new" | "graph";
@@ -261,6 +265,7 @@ export function App() {
   const [practiceSessionStartedAt, setPracticeSessionStartedAt] = useState(() => new Date().toISOString());
   const [practiceSessionStats, setPracticeSessionStats] = useState<SessionAnswerStat[]>([]);
   const [sessionSummaries, setSessionSummaries] = useState<StoredSessionSummary[]>([]);
+  const [storedReviewSessions, setStoredReviewSessions] = useState<ReviewSession[]>([]);
   const [practiceRecordRatings, setPracticeRecordRatings] = useState(false);
   const [selectedNode, setSelectedNode] = useState<StudyGraphNode | null>(null);
   const [pageName, setPageName] = useState("Imported Page");
@@ -428,8 +433,10 @@ export function App() {
   async function loadReviewSessionSummariesFromStorage() {
     try {
       const sessions = await loadReviewSessions();
+      setStoredReviewSessions(sessions);
       setSessionSummaries(sessions.map(reviewSessionToStoredSummary));
     } catch {
+      setStoredReviewSessions([]);
       setSessionSummaries([]);
     }
   }
@@ -437,8 +444,13 @@ export function App() {
   async function persistReviewSession(session: ReviewSession) {
     try {
       const sessions = await saveReviewSession(session);
+      setStoredReviewSessions(sessions);
       setSessionSummaries(sessions.map(reviewSessionToStoredSummary));
     } catch {
+      setStoredReviewSessions((current) => {
+        const without = current.filter((item) => item.id !== session.id);
+        return [...without, session];
+      });
       setSessionSummaries((current) => upsertSessionSummary(current, reviewSessionToStoredSummary(session)));
     }
   }
@@ -1232,13 +1244,16 @@ export function App() {
   const todoItems = useMemo(() => buildTodoItems(pages, cards), [pages, cards]);
   const decks = useMemo(() => groupCardsByDeck(cards), [cards]);
   const allDueCards = useMemo(() => cards.filter(isDue), [cards]);
-  const dueCards = useMemo(() => buildReviewQueue(cards, reviewNodeId, settings), [cards, reviewNodeId, settings]);
+  const priorityContext = useMemo(() => buildPriorityContext(cards, storedReviewSessions), [cards, storedReviewSessions]);
+  const dueCards = useMemo(() => buildReviewQueue(cards, reviewNodeId, settings, storedReviewSessions), [cards, reviewNodeId, settings, storedReviewSessions]);
   const practiceQueue = useMemo(
-    () => buildPracticeQueue(cards, practiceMode, practiceDeckSlug, practiceNodeId),
-    [cards, practiceMode, practiceDeckSlug, practiceNodeId],
+    () => buildPracticeQueue(cards, practiceMode, practiceDeckSlug, practiceNodeId, storedReviewSessions),
+    [cards, practiceMode, practiceDeckSlug, practiceNodeId, storedReviewSessions],
   );
   const currentCard = dueCards[selectedCardIndex];
   const currentPracticeCard = practiceQueue[practiceIndex];
+  const currentCardPriority = currentCard ? priorityContext.cardsById.get(currentCard.id) : undefined;
+  const currentPracticeCardPriority = currentPracticeCard ? priorityContext.cardsById.get(currentPracticeCard.id) : undefined;
 
   useEffect(() => {
     setReviewStartedAt(Date.now());
@@ -1486,6 +1501,7 @@ export function App() {
             studyMode={studyMode}
             onStudyModeChange={setStudyMode}
             responseTimeMs={reviewResponseTimeMs}
+            priority={currentCardPriority}
             sessionStats={reviewSessionStats}
             recentSummaries={sessionSummaries}
             allCardCount={cards.length}
@@ -1516,6 +1532,7 @@ export function App() {
             studyMode={practiceStudyMode}
             onStudyModeChange={setPracticeStudyMode}
             responseTimeMs={practiceResponseTimeMs}
+            priority={currentPracticeCardPriority}
             sessionStats={practiceSessionStats}
             recentSummaries={sessionSummaries}
             allCardCount={cards.length}
@@ -1552,6 +1569,7 @@ export function App() {
         {screen === "graph" && snapshot && (
           <GraphView
             snapshot={snapshot}
+            priorityContext={priorityContext}
             selectedNode={selectedNode}
             onSelectNode={setSelectedNode}
             onStartDue={startGraphReview}
@@ -2917,6 +2935,19 @@ function CardStudyMeta({ card }: { card: StudyCard }) {
   );
 }
 
+function PriorityPanel({ priority }: { priority?: CardPriority | TopicPriority }) {
+  if (!priority) return null;
+  return (
+    <aside className="priority-panel" title={priority.reasons.join("\n")}>
+      <strong>{priorityScoreLabel(priority)}</strong>
+      <span>{priorityReasonSummary(priority, 3)}</span>
+      {priority.relatedWeaknessHints.length > 0 && (
+        <small>Related weakness: {priority.relatedWeaknessHints.slice(0, 2).join("; ")}</small>
+      )}
+    </aside>
+  );
+}
+
 function StudyModeToggle({ mode, onChange }: { mode: StudyMode; onChange: (mode: StudyMode) => void }) {
   return (
     <div className="study-mode-toggle">
@@ -3220,6 +3251,7 @@ function ReviewView({
   studyMode,
   onStudyModeChange,
   responseTimeMs,
+  priority,
   sessionStats,
   recentSummaries,
   allCardCount,
@@ -3239,6 +3271,7 @@ function ReviewView({
   studyMode: StudyMode;
   onStudyModeChange: (mode: StudyMode) => void;
   responseTimeMs?: number;
+  priority?: CardPriority;
   sessionStats: SessionAnswerStat[];
   recentSummaries: StoredSessionSummary[];
   allCardCount: number;
@@ -3355,6 +3388,7 @@ function ReviewView({
       <article className="review-card">
         <h2>{card.question}</h2>
         <CardStudyMeta card={card} />
+        <PriorityPanel priority={priority} />
         {card.linked_pages.length > 0 && <p>Linked: {card.linked_pages.join(", ")}</p>}
       </article>
       {showAnswer && (
@@ -3408,6 +3442,7 @@ function FreePracticeView({
   studyMode,
   onStudyModeChange,
   responseTimeMs,
+  priority,
   sessionStats,
   recentSummaries,
   allCardCount,
@@ -3434,6 +3469,7 @@ function FreePracticeView({
   studyMode: StudyMode;
   onStudyModeChange: (mode: StudyMode) => void;
   responseTimeMs?: number;
+  priority?: CardPriority;
   sessionStats: SessionAnswerStat[];
   recentSummaries: StoredSessionSummary[];
   allCardCount: number;
@@ -3593,6 +3629,7 @@ function FreePracticeView({
           <article className="review-card">
             <h2>{card.question}</h2>
             <CardStudyMeta card={card} />
+            <PriorityPanel priority={priority} />
             {card.linked_pages.length > 0 && <p>Linked: {card.linked_pages.join(", ")}</p>}
           </article>
           {showAnswer && (
@@ -3638,6 +3675,7 @@ function FreePracticeView({
 
 function GraphView({
   snapshot,
+  priorityContext,
   selectedNode,
   onSelectNode,
   onStartDue,
@@ -3647,6 +3685,7 @@ function GraphView({
   onOpenPageByName,
 }: {
   snapshot: DesktopSnapshot;
+  priorityContext: PriorityContext;
   selectedNode: StudyGraphNode | null;
   onSelectNode: (node: StudyGraphNode) => void;
   onStartDue: (node: StudyGraphNode) => void;
@@ -3674,6 +3713,13 @@ function GraphView({
   const selectedStats = summarizeCards(detailCards);
   const selectedDueCount = detailCards.filter(isDue).length;
   const selectedCard = selectedNode?.kind === "card" ? selectedCards[0] : undefined;
+  const selectedPriority = selectedCard
+    ? priorityContext.cardsById.get(selectedCard.id)
+    : selectedNode?.kind === "topic"
+      ? priorityContext.topicsByKey.get(selectedNode.id.split(":").slice(1).join(":"))
+      : selectedNode?.kind === "deck"
+        ? priorityContext.topics.filter((topic) => selectedNode.id === `deck:${topic.deckSlug}`).sort((left, right) => right.score - left.score)[0]
+        : undefined;
   const graphStats = summarizeCards(applyGraphCardFilters(snapshot.cards, statusFilter, deckFilter));
   const canOpenPage =
     selectedNode &&
@@ -3829,6 +3875,7 @@ function GraphView({
               </div>
               {isSystemGraphNode(selectedNode) && <span className="signal-badge">cluster</span>}
             </div>
+            <PriorityPanel priority={selectedPriority} />
             <dl className="details-stats">
               <dt>Total</dt><dd>{selectedStats.total}</dd>
               <dt>Due now</dt><dd>{selectedStats.due}</dd>
@@ -3848,11 +3895,15 @@ function GraphView({
             {selectedStats.topTopics.length > 0 && (
               <div className="details-card-list compact">
                 <strong>Topic pressure</strong>
-                {selectedStats.topTopics.slice(0, 6).map((topic) => (
-                  <span key={`${topic.deck}:${topic.topic}`}>
-                    {topic.topic} · {topic.count} cards · {topic.due} due · {topic.weak} weak
-                  </span>
-                ))}
+                {selectedStats.topTopics.slice(0, 6).map((topic) => {
+                  const topicKey = `${normalizeSlug(topic.deck)}:${normalizeSlug(topic.topic)}`;
+                  const priority = priorityContext.topicsByKey.get(topicKey);
+                  return (
+                    <span key={`${topic.deck}:${topic.topic}`}>
+                      {topic.topic} · {topic.count} cards · {topic.due} due · {topic.weak} weak · {priorityScoreLabel(priority)}
+                    </span>
+                  );
+                })}
               </div>
             )}
             {selectedCard && (
@@ -3864,12 +3915,15 @@ function GraphView({
             {detailCards.length > 1 && (
               <div className="details-card-list">
                 <strong>Related cards ({detailCards.length})</strong>
-                {detailCards.slice(0, 12).map((card) => (
-                  <button key={card.id} onClick={() => onOpenCard(card)} className={isWeak(card) || isOverdue(card) ? "attention" : undefined}>
-                    {shorten(card.question, 52)}
-                    <small>{card.deck} / {card.topic} · {dueLabel(card)}</small>
-                  </button>
-                ))}
+                {detailCards.slice(0, 12).map((card) => {
+                  const priority = priorityContext.cardsById.get(card.id);
+                  return (
+                    <button key={card.id} onClick={() => onOpenCard(card)} className={isWeak(card) || isOverdue(card) ? "attention" : undefined} title={priorityReasonSummary(priority, 4)}>
+                      {shorten(card.question, 52)}
+                      <small>{card.deck} / {card.topic} · {dueLabel(card)} · {priorityScoreLabel(priority)}</small>
+                    </button>
+                  );
+                })}
                 {detailCards.length > 12 && <span className="details-more">+{detailCards.length - 12} more cards hidden</span>}
               </div>
             )}

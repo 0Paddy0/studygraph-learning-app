@@ -11,6 +11,7 @@ import type {
   RatingRecommendation,
   RatingRecommendationMode,
   RatingRecommendationReasonCode,
+  ReviewSession,
   StudyCard,
   StudyGraphEdge,
   StudyGraphNode,
@@ -410,6 +411,387 @@ export function levenshteinDistance(left: string, right: string) {
 const commonClozeWords = new Set(["this", "that", "with", "from", "have", "will", "eine", "einer", "einen", "einem", "oder", "aber", "auch", "dass", "nicht", "werden", "kann", "sind", "the", "and", "for", "into"]);
 
 
+export interface PriorityFactor {
+  code: string;
+  label: string;
+  value: number;
+  weight: number;
+  contribution: number;
+  detail: string;
+}
+
+export interface PriorityHistorySignal {
+  averageResponseTimeMs?: number;
+  slowAnswers: number;
+  clozeMisses: number;
+  clozeBlanks: number;
+  againCount: number;
+  hardCount: number;
+}
+
+export interface TopicPriority {
+  key: string;
+  deck: string;
+  deckSlug: string;
+  topic: string;
+  topicSlug: string;
+  score: number;
+  baseScore: number;
+  propagatedScore: number;
+  cards: StudyCard[];
+  factors: PriorityFactor[];
+  reasons: string[];
+  relatedWeaknessHints: string[];
+}
+
+export interface CardPriority {
+  cardId: string;
+  score: number;
+  topicKey: string;
+  topicScore: number;
+  factors: PriorityFactor[];
+  reasons: string[];
+  relatedWeaknessHints: string[];
+}
+
+export interface PriorityContext {
+  topics: TopicPriority[];
+  topicsByKey: Map<string, TopicPriority>;
+  cardsById: Map<string, CardPriority>;
+}
+
+interface TopicPriorityDraft {
+  key: string;
+  deck: string;
+  deckSlug: string;
+  topic: string;
+  topicSlug: string;
+  cards: StudyCard[];
+  concepts: Set<string>;
+  sources: Set<string>;
+  baseScore: number;
+  propagatedScore: number;
+  factors: PriorityFactor[];
+  reasons: string[];
+  relatedWeaknessHints: string[];
+  debt: number;
+}
+
+const priorityContextCache = new WeakMap<StudyCard[], { sessions?: ReviewSession[]; context: PriorityContext }>();
+const slowPriorityAnswerMs = 20_000;
+
+export function buildPriorityContext(cards: StudyCard[], reviewSessions: ReviewSession[] = []): PriorityContext {
+  const cached = priorityContextCache.get(cards);
+  if (cached && cached.sessions === reviewSessions) return cached.context;
+
+  const historyByCard = buildPriorityHistorySignals(reviewSessions);
+  const topicDrafts = buildTopicPriorityDrafts(cards, historyByCard);
+  propagateTopicWeakness(topicDrafts);
+
+  const topics = Array.from(topicDrafts.values()).map(finalizeTopicPriority).sort((left, right) => right.score - left.score || left.topic.localeCompare(right.topic));
+  const topicsByKey = new Map(topics.map((topic) => [topic.key, topic]));
+  const cardsById = new Map<string, CardPriority>();
+  for (const card of cards) {
+    const priority = scoreCardPriority(card, topicsByKey.get(topicPriorityKey(card)), historyByCard.get(card.id));
+    cardsById.set(card.id, priority);
+  }
+
+  const context = { topics, topicsByKey, cardsById };
+  priorityContextCache.set(cards, { sessions: reviewSessions, context });
+  return context;
+}
+
+export function cardPriorityFor(card: StudyCard, context: PriorityContext = buildPriorityContext([card])) {
+  return context.cardsById.get(card.id) ?? scoreCardPriority(card, context.topicsByKey.get(topicPriorityKey(card)));
+}
+
+export function priorityReasonSummary(priority?: CardPriority | TopicPriority, maxReasons = 2) {
+  if (!priority) return "No priority signal yet";
+  const reasons = priority.reasons.slice(0, maxReasons);
+  if (reasons.length === 0) return "Low pressure";
+  return reasons.join(" · ");
+}
+
+export function priorityBadgeLabel(priority?: CardPriority | TopicPriority) {
+  const score = priority?.score ?? 0;
+  if (score >= 75) return "P1";
+  if (score >= 50) return "P2";
+  if (score >= 25) return "P3";
+  return "P4";
+}
+
+export function priorityScoreLabel(priority?: CardPriority | TopicPriority) {
+  const score = priority?.score ?? 0;
+  return `${priorityBadgeLabel(priority)} · ${Math.round(score)}/100`;
+}
+
+export function topicPriorityKey(card: StudyCard) {
+  return `${card.deck_slug}:${card.topic_slug}`;
+}
+
+function buildPriorityHistorySignals(reviewSessions: ReviewSession[]) {
+  const byCard = new Map<string, PriorityHistorySignal>();
+  for (const session of reviewSessions.slice(-30)) {
+    for (const item of session.items ?? []) {
+      const current = byCard.get(item.cardId) ?? { slowAnswers: 0, clozeMisses: 0, clozeBlanks: 0, againCount: 0, hardCount: 0 };
+      if (typeof item.responseTimeMs === "number") {
+        const previousCount = (current as PriorityHistorySignal & { responseCount?: number }).responseCount ?? 0;
+        const previousAverage = current.averageResponseTimeMs ?? 0;
+        current.averageResponseTimeMs = ((previousAverage * previousCount) + item.responseTimeMs) / (previousCount + 1);
+        (current as PriorityHistorySignal & { responseCount?: number }).responseCount = previousCount + 1;
+        if (item.responseTimeMs >= slowPriorityAnswerMs) current.slowAnswers += 1;
+      }
+      if (item.rating === "again") current.againCount += 1;
+      if (item.rating === "hard") current.hardCount += 1;
+      if (item.clozeResult?.blanks) {
+        current.clozeBlanks += item.clozeResult.blanks.length;
+        current.clozeMisses += item.clozeResult.blanks.filter((blank) => !blank.correct).length;
+      }
+      byCard.set(item.cardId, current);
+    }
+  }
+  return byCard;
+}
+
+function buildTopicPriorityDrafts(cards: StudyCard[], historyByCard: Map<string, PriorityHistorySignal>) {
+  const drafts = new Map<string, TopicPriorityDraft>();
+  for (const card of cards.filter((item) => todoStatusForCard(item) !== "done")) {
+    const key = topicPriorityKey(card);
+    const draft = drafts.get(key) ?? {
+      key,
+      deck: card.deck,
+      deckSlug: card.deck_slug,
+      topic: card.topic,
+      topicSlug: card.topic_slug,
+      cards: [],
+      concepts: new Set<string>(),
+      sources: new Set<string>(),
+      baseScore: 0,
+      propagatedScore: 0,
+      factors: [],
+      reasons: [],
+      relatedWeaknessHints: [],
+      debt: 0,
+    };
+    draft.cards.push(card);
+    priorityConceptsForCard(card).forEach((concept) => draft.concepts.add(concept));
+    if (card.source_page) draft.sources.add(normalizeSlug(card.source_page));
+    drafts.set(key, draft);
+  }
+
+  for (const draft of drafts.values()) {
+    const historySignals = draft.cards.map((card) => historyByCard.get(card.id)).filter((signal): signal is PriorityHistorySignal => Boolean(signal));
+    const dueCards = draft.cards.filter(isDue);
+    const overdueCards = draft.cards.filter(isOverdue);
+    const weakCards = draft.cards.filter(isWeak);
+    const newCards = draft.cards.filter(isNewCard);
+    const nextUpCards = draft.cards.filter((card) => todoStatusForCard(card) === "doing");
+    const maxOverdueDays = overdueCards.reduce((max, card) => Math.max(max, overdueDays(card)), 0);
+    const srsAgainCount = draft.cards.filter((card) => card.srs.last_rating === "again").length;
+    const srsHardCount = draft.cards.reduce((total, card) => total + Math.min(card.srs.hard_count ?? 0, 3), 0);
+    const historyAgainCount = historySignals.reduce((total, signal) => total + signal.againCount, 0);
+    const historyHardCount = historySignals.reduce((total, signal) => total + signal.hardCount, 0);
+    const slowAnswers = historySignals.reduce((total, signal) => total + signal.slowAnswers, 0);
+    const averageResponseTimeMs = average(historySignals.map((signal) => signal.averageResponseTimeMs).filter((value): value is number => typeof value === "number"));
+    const clozeBlanks = historySignals.reduce((total, signal) => total + signal.clozeBlanks, 0);
+    const clozeMisses = historySignals.reduce((total, signal) => total + signal.clozeMisses, 0);
+    draft.debt = dueCards.length + weakCards.length * 1.6 + overdueCards.length * 2 + newCards.length * 0.5;
+
+    addFactor(draft.factors, "overdue", "Overdue", normalizeSignal(overdueCards.length * 0.35 + maxOverdueDays * 0.18), 28, `${overdueCards.length} overdue${maxOverdueDays > 0 ? `, max ${Math.round(maxOverdueDays)}d late` : ""}`);
+    addFactor(draft.factors, "weak", "Weak cards", normalizeSignal(weakCards.length * 0.42 + weakCards.length / Math.max(1, draft.cards.length)), 22, `${weakCards.length} weak cards`);
+    addFactor(draft.factors, "errors", "Errors", normalizeSignal((srsAgainCount + historyAgainCount) * 0.5 + (srsHardCount + historyHardCount) * 0.22), 18, `${srsAgainCount + historyAgainCount} Again, ${srsHardCount + historyHardCount} Hard signals`);
+    addFactor(draft.factors, "answer-time", "Answer time", normalizeSignal(slowAnswers * 0.35 + Math.max(0, (averageResponseTimeMs - 12_000) / 25_000)), 12, averageResponseTimeMs ? `avg ${Math.round(averageResponseTimeMs / 100) / 10}s, ${slowAnswers} slow` : "no recent timing pressure");
+    addFactor(draft.factors, "cloze-misses", "Cloze misses", clozeBlanks > 0 ? Math.min(1, clozeMisses / clozeBlanks + clozeMisses * 0.08) : 0, 12, clozeBlanks > 0 ? `${clozeMisses}/${clozeBlanks} missed blanks` : "no cloze miss history");
+    addFactor(draft.factors, "learning-debt", "Learning debt", normalizeSignal(draft.debt * 0.24), 15, `${dueCards.length} due, ${newCards.length} new`);
+    addFactor(draft.factors, "next-up", "Next up", nextUpCards.length > 0 ? 1 : 0, 18, nextUpCards.length > 0 ? `${nextUpCards.length} Next up card(s)` : "not marked Next up");
+
+    draft.baseScore = clampPriority(draft.factors.reduce((total, factor) => total + factor.contribution, 0));
+  }
+  return drafts;
+}
+
+function propagateTopicWeakness(drafts: Map<string, TopicPriorityDraft>) {
+  const topics = Array.from(drafts.values());
+  for (const source of topics) {
+    const sourceWeakness = source.factors.find((factor) => factor.code === "weak")?.contribution ?? 0;
+    const sourceErrors = source.factors.find((factor) => factor.code === "errors")?.contribution ?? 0;
+    const sourceDebt = source.factors.find((factor) => factor.code === "learning-debt")?.contribution ?? 0;
+    const sourceSignal = Math.min(30, sourceWeakness + sourceErrors * 0.8 + sourceDebt * 0.35);
+    if (sourceSignal < 2) continue;
+    for (const target of topics) {
+      if (target.key === source.key) continue;
+      const relatedness = topicRelatedness(source, target);
+      if (relatedness <= 0) continue;
+      const propagated = sourceSignal * relatedness;
+      if (propagated < 1) continue;
+      target.propagatedScore += propagated;
+      target.relatedWeaknessHints.push(`${source.deck}/${source.topic} +${Math.round(propagated)} via ${relatednessLabel(source, target)}`);
+    }
+  }
+}
+
+function finalizeTopicPriority(draft: TopicPriorityDraft): TopicPriority {
+  const propagation = Math.min(20, draft.propagatedScore);
+  if (propagation > 0) {
+    addFactor(draft.factors, "related-weakness", "Related weakness", propagation / 20, 20, draft.relatedWeaknessHints.slice(0, 2).join("; "));
+  }
+  const score = clampPriority(draft.factors.reduce((total, factor) => total + factor.contribution, 0));
+  return {
+    key: draft.key,
+    deck: draft.deck,
+    deckSlug: draft.deckSlug,
+    topic: draft.topic,
+    topicSlug: draft.topicSlug,
+    score,
+    baseScore: draft.baseScore,
+    propagatedScore: propagation,
+    cards: draft.cards,
+    factors: draft.factors.filter((factor) => factor.contribution > 0).sort((left, right) => right.contribution - left.contribution),
+    reasons: priorityReasons(draft.factors),
+    relatedWeaknessHints: uniqueStrings(draft.relatedWeaknessHints).slice(0, 4),
+  };
+}
+
+function scoreCardPriority(card: StudyCard, topic?: TopicPriority, history?: PriorityHistorySignal): CardPriority {
+  const factors: PriorityFactor[] = [];
+  const overdue = overdueDays(card);
+  addFactor(factors, "due", "Due", isDue(card) ? 1 : 0, isNewCard(card) ? 16 : 24, isNewCard(card) ? "new and available" : overdue > 0 ? `${Math.round(overdue)}d late` : "due now");
+  addFactor(factors, "weak", "Weak", isWeak(card) ? 1 : 0, 20, "weak SRS history");
+  const lapses = card.srs.lapses ?? 0;
+  const hardCount = card.srs.hard_count ?? 0;
+  const ease = card.srs.ease ?? 2.5;
+  const intervalDays = card.srs.interval_days ?? 0;
+  addFactor(factors, "errors", "Errors", normalizeSignal(Number(card.srs.last_rating === "again") * 0.7 + lapses * 0.3 + hardCount * 0.22 + (history?.againCount ?? 0) * 0.35 + (history?.hardCount ?? 0) * 0.18), 18, `${lapses + (history?.againCount ?? 0)} lapse/Again, ${hardCount + (history?.hardCount ?? 0)} Hard`);
+  addFactor(factors, "answer-time", "Answer time", normalizeSignal((history?.slowAnswers ?? 0) * 0.45 + Math.max(0, ((history?.averageResponseTimeMs ?? 0) - 12_000) / 28_000)), 10, history?.averageResponseTimeMs ? `avg ${Math.round(history.averageResponseTimeMs / 100) / 10}s` : "no recent timing pressure");
+  addFactor(factors, "cloze-misses", "Cloze misses", history?.clozeBlanks ? Math.min(1, history.clozeMisses / history.clozeBlanks + history.clozeMisses * 0.1) : 0, 10, history?.clozeBlanks ? `${history.clozeMisses}/${history.clozeBlanks} missed blanks` : "no cloze miss history");
+  addFactor(factors, "learning-debt", "Learning debt", normalizeSignal((isDue(card) ? 0.45 : 0) + (isNewCard(card) ? 0.35 : 0) + Math.max(0, (2.2 - ease) / 1.4)), 13, `ease ${ease.toFixed(1)}, interval ${intervalDays}d`);
+  addFactor(factors, "topic-pressure", "Topic pressure", Math.min(1, (topic?.baseScore ?? 0) / 80), 14, topic ? `${topic.topic} base ${Math.round(topic.baseScore)}` : "no topic pressure");
+  addFactor(factors, "related-weakness", "Related weakness", Math.min(1, (topic?.propagatedScore ?? 0) / 20), 12, topic?.relatedWeaknessHints[0] ?? "no related weakness");
+  addFactor(factors, "next-up", "Next up", todoStatusForCard(card) === "doing" ? 1 : 0, 60, "marked Next up");
+
+  const score = clampPriority(factors.reduce((total, factor) => total + factor.contribution, 0));
+  const activeFactors = factors.filter((factor) => factor.contribution > 0).sort((left, right) => right.contribution - left.contribution);
+  return {
+    cardId: card.id,
+    score,
+    topicKey: topicPriorityKey(card),
+    topicScore: topic?.score ?? 0,
+    factors: activeFactors,
+    reasons: priorityReasons(activeFactors),
+    relatedWeaknessHints: topic?.relatedWeaknessHints ?? [],
+  };
+}
+
+function priorityReasons(factors: PriorityFactor[]) {
+  return factors
+    .filter((factor) => factor.contribution >= 2)
+    .sort((left, right) => right.contribution - left.contribution)
+    .map((factor) => `${factor.label}: ${factor.detail}`)
+    .slice(0, 5);
+}
+
+function addFactor(factors: PriorityFactor[], code: string, label: string, value: number, weight: number, detail: string) {
+  const normalized = Math.min(1, Math.max(0, value));
+  factors.push({
+    code,
+    label,
+    value: Number(normalized.toFixed(3)),
+    weight,
+    contribution: Number((normalized * weight).toFixed(2)),
+    detail,
+  });
+}
+
+function topicRelatedness(left: TopicPriorityDraft, right: TopicPriorityDraft) {
+  let score = 0;
+  if (left.deckSlug === right.deckSlug) score += 0.18;
+  const sharedConcepts = intersectionCount(left.concepts, right.concepts);
+  score += Math.min(0.55, sharedConcepts * 0.22);
+  if (intersectionCount(left.sources, right.sources) > 0) score += 0.18;
+  if (left.topicSlug === right.topicSlug) score += 0.25;
+  return Math.min(0.75, score);
+}
+
+function relatednessLabel(left: TopicPriorityDraft, right: TopicPriorityDraft) {
+  const sharedConcepts = Array.from(left.concepts).filter((concept) => right.concepts.has(concept));
+  if (sharedConcepts.length > 0) return `shared ${sharedConcepts.slice(0, 2).join(", ")}`;
+  if (left.deckSlug === right.deckSlug) return "same deck";
+  if (intersectionCount(left.sources, right.sources) > 0) return "same source";
+  return "graph link";
+}
+
+function priorityConceptsForCard(card: StudyCard) {
+  const concepts = new Set<string>();
+  for (const page of card.linked_pages) {
+    const lower = page.toLocaleLowerCase();
+    if (!lower.startsWith("deck/") && !lower.startsWith("topic/")) concepts.add(normalizeSlug(page));
+  }
+  for (const tag of card.tags) {
+    const lower = tag.toLocaleLowerCase();
+    if (lower !== "card" && !lower.startsWith("deck/") && !lower.startsWith("topic/")) concepts.add(normalizeSlug(`#${tag}`));
+  }
+  concepts.add(normalizeSlug(card.topic));
+  return Array.from(concepts).filter(Boolean);
+}
+
+function intersectionCount<T>(left: Set<T>, right: Set<T>) {
+  let count = 0;
+  for (const value of left) if (right.has(value)) count += 1;
+  return count;
+}
+
+function normalizeSignal(value: number) {
+  return 1 - Math.exp(-Math.max(0, value));
+}
+
+function clampPriority(value: number) {
+  return Math.min(100, Math.max(0, Number(value.toFixed(2))));
+}
+
+function overdueDays(card: StudyCard) {
+  if (!isOverdue(card) || !card.srs.due_at) return 0;
+  return Math.max(0, (Date.now() - new Date(card.srs.due_at).getTime()) / 86_400_000);
+}
+
+function average(values: number[]) {
+  return values.length === 0 ? 0 : values.reduce((total, value) => total + value, 0) / values.length;
+}
+
+function interleaveByTopic(cards: StudyCard[], priorities: Map<string, CardPriority>, limit = cards.length) {
+  const buckets = new Map<string, StudyCard[]>();
+  for (const card of cards) {
+    const key = topicPriorityKey(card);
+    buckets.set(key, [...(buckets.get(key) ?? []), card]);
+  }
+  for (const bucket of buckets.values()) bucket.sort((left, right) => compareCardPriority(left, right, priorities));
+
+  const result: StudyCard[] = [];
+  let lastTopic = "";
+  while (result.length < limit && buckets.size > 0) {
+    const candidates = Array.from(buckets.entries())
+      .filter(([, bucket]) => bucket.length > 0)
+      .sort((left, right) => compareCardPriority(left[1][0], right[1][0], priorities));
+    const selected = candidates.find(([topic]) => topic !== lastTopic) ?? candidates[0];
+    if (!selected) break;
+    const [topic, bucket] = selected;
+    const next = bucket.shift();
+    if (!next) {
+      buckets.delete(topic);
+      continue;
+    }
+    result.push(next);
+    lastTopic = topic;
+    if (bucket.length === 0) buckets.delete(topic);
+  }
+  return result;
+}
+
+function compareCardPriority(left: StudyCard, right: StudyCard, priorities: Map<string, CardPriority>) {
+  const scoreCompare = (priorities.get(right.id)?.score ?? 0) - (priorities.get(left.id)?.score ?? 0);
+  if (scoreCompare !== 0) return scoreCompare;
+  return sortReviewCards(left, right);
+}
+
 export function countBlocks(pages: Page[]) {
   return pages.reduce((total, page) => total + flattenBlocks(page.blocks).length, 0);
 }
@@ -445,22 +827,22 @@ export function groupCardsByDeck(cards: StudyCard[]) {
   }));
 }
 
-export function buildReviewQueue(cards: StudyCard[], nodeId: string | null, settings: AppSettings) {
+export function buildReviewQueue(cards: StudyCard[], nodeId: string | null, settings: AppSettings, reviewSessions: ReviewSession[] = []) {
+  const context = buildPriorityContext(cards, reviewSessions);
   const scopedCards = nodeId ? cardsForGraphNode(cards, nodeId) : cards;
   const activeCards = scopedCards.filter((card) => todoStatusForCard(card) !== "done");
-  const nextUpCards = activeCards.filter((card) => todoStatusForCard(card) === "doing").sort(sortReviewCards);
-  const overdueCards = activeCards.filter((card) => isDue(card) && !isNewCard(card)).sort(sortReviewCards);
-  const weakCards = activeCards.filter((card) => isDue(card) && isWeak(card)).sort(sortReviewCards);
-  const newCards = activeCards.filter((card) => isDue(card) && isNewCard(card)).sort(sortReviewCards);
-  return uniqueCards([
-    ...nextUpCards,
-    ...overdueCards,
-    ...weakCards,
-    ...newCards.slice(0, settings.newCardsPerDay),
-  ]).slice(0, settings.reviewsPerDay);
+  const nextUpCards = activeCards.filter((card) => todoStatusForCard(card) === "doing");
+  const dueReviewCards = activeCards.filter((card) => isDue(card) && !isNewCard(card));
+  const newCards = activeCards
+    .filter((card) => isDue(card) && isNewCard(card))
+    .sort((left, right) => compareCardPriority(left, right, context.cardsById))
+    .slice(0, settings.newCardsPerDay);
+  const candidates = uniqueCards([...nextUpCards, ...dueReviewCards, ...newCards])
+    .sort((left, right) => compareCardPriority(left, right, context.cardsById));
+  return interleaveByTopic(candidates, context.cardsById, settings.reviewsPerDay);
 }
 
-export function buildPracticeQueue(cards: StudyCard[], mode: PracticeMode, deckSlug: string, nodeId: string) {
+export function buildPracticeQueue(cards: StudyCard[], mode: PracticeMode, deckSlug: string, nodeId: string, reviewSessions: ReviewSession[] = []) {
   let queue = [...cards];
 
   if (mode === "graph" && nodeId) {
@@ -479,13 +861,11 @@ export function buildPracticeQueue(cards: StudyCard[], mode: PracticeMode, deckS
     }
   }
 
-  return queue.sort((left, right) => {
-    const deckCompare = left.deck.localeCompare(right.deck);
-    if (deckCompare !== 0) return deckCompare;
-    const topicCompare = left.topic.localeCompare(right.topic);
-    if (topicCompare !== 0) return topicCompare;
-    return left.question.localeCompare(right.question);
-  });
+  const context = buildPriorityContext(cards, reviewSessions);
+  return interleaveByTopic(
+    queue.sort((left, right) => compareCardPriority(left, right, context.cardsById)),
+    context.cardsById,
+  );
 }
 
 interface GraphCardIndex {
