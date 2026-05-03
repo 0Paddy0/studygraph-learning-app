@@ -1312,23 +1312,23 @@ export function App() {
         </button>
 
         <nav className="nav" aria-label="Main navigation">
-          <button className={screen === "notes" ? "active" : ""} onClick={() => setScreen("notes")}>Edit Desk</button>
-          <button className={screen === "doc" ? "active" : ""} onClick={() => {
-            setScreen("doc");
-            void loadDocsFromStorage();
-          }}>
-            Doc
-          </button>
+          <button className={screen === "dashboard" ? "active" : ""} onClick={() => setScreen("dashboard")}>Decks</button>
           <button className={screen === "todo" ? "active" : ""} onClick={() => {
             setTodoTargetPageId((current) => current || selectedPage?.id || pages[0]?.id || "");
             setScreen("todo");
           }}>
             To Do
           </button>
-          <button className={screen === "dashboard" ? "active" : ""} onClick={() => setScreen("dashboard")}>Decks</button>
+          <button className={screen === "doc" ? "active" : ""} onClick={() => {
+            setScreen("doc");
+            void loadDocsFromStorage();
+          }}>
+            Doc
+          </button>
           <button className={screen === "review" ? "active" : ""} onClick={() => startDueReview()}>Review</button>
-          <button className={screen === "practice" ? "active" : ""} onClick={() => startPractice("all")}>Free Practice</button>
+          <button className={screen === "practice" ? "active" : ""} onClick={() => startPractice("all")}>Fpractice</button>
           <button className={screen === "graph" ? "active" : ""} onClick={() => setScreen("graph")}>Study Graph</button>
+          <button className={screen === "notes" ? "active" : ""} onClick={() => setScreen("notes")}>Edit Desk</button>
           <button className={screen === "settings" ? "active" : ""} onClick={() => {
             setScreen("settings");
             void refreshDebugInfo();
