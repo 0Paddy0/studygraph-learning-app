@@ -1701,3 +1701,20 @@ label {
   padding: 5px 9px;
   background: rgba(107, 179, 182, 0.08);
 }
+
+.graph-panel {
+  min-width: 0;
+}
+
+.graph-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #8eb0af;
+}
+
+.cloze-evaluation button {
+  border-color: #6bb3b6;
+  background: rgba(107, 179, 182, 0.16);
+}

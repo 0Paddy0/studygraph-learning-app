@@ -1186,6 +1186,7 @@ export function App() {
             onCreate={(content, pageId) => void createTodoFromQuickCapture(content, pageId)}
             onSetStatus={(item, status) => void updateTodoItemStatus(item, status)}
             onOpenBlock={openTodoItem}
+            onEditBlock={(item) => openBlock(item.pageId, item.block.id)}
           />
         )}
         {screen === "dashboard" && (
@@ -2410,6 +2411,7 @@ function TodoView({
   onCreate,
   onSetStatus,
   onOpenBlock,
+  onEditBlock,
 }: {
   pages: Page[];
   items: TodoItem[];
@@ -2421,6 +2423,7 @@ function TodoView({
   onCreate: (content: string, pageId: string) => void;
   onSetStatus: (item: TodoItem, status: TodoStatus) => void;
   onOpenBlock: (item: TodoItem) => void;
+  onEditBlock: (item: TodoItem) => void;
 }) {
   const [filter, setFilter] = useState("");
   const filteredItems = useMemo(() => filterTodoItems(items, filter), [items, filter]);
@@ -2465,9 +2468,9 @@ function TodoView({
       </div>
 
       <div className="todo-board">
-        <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
-        <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
-        <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} />
+        <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} onEditBlock={onEditBlock} />
+        <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} onEditBlock={onEditBlock} />
+        <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} onEditBlock={onEditBlock} />
       </div>
     </section>
   );
@@ -2478,11 +2481,13 @@ function TodoColumn({
   items,
   onSetStatus,
   onOpenBlock,
+  onEditBlock,
 }: {
   title: string;
   items: TodoItem[];
   onSetStatus: (item: TodoItem, status: TodoStatus) => void;
   onOpenBlock: (item: TodoItem) => void;
+  onEditBlock: (item: TodoItem) => void;
 }) {
   return (
     <section className="todo-column">
@@ -2500,6 +2505,8 @@ function TodoColumn({
             </button>
             <small>{todoItemSubtitle(item)}</small>
             <div className="todo-actions">
+              <button className="primary" onClick={() => onOpenBlock(item)}>Learn Topic</button>
+              <button onClick={() => onEditBlock(item)}>Edit Source</button>
               <button disabled={item.status === "open"} onClick={() => onSetStatus(item, "open")}>Open</button>
               <button disabled={item.status === "doing"} onClick={() => onSetStatus(item, "doing")}>Next up</button>
               <button className="success" disabled={item.status === "done"} onClick={() => onSetStatus(item, "done")}>Done</button>
@@ -2570,7 +2577,7 @@ function StudyModeToggle({ mode, onChange }: { mode: StudyMode; onChange: (mode:
   );
 }
 
-function ClozeAnswer({ card }: { card: StudyCard }) {
+function ClozeAnswer({ card, onRate }: { card: StudyCard; onRate?: (rating: Rating) => void }) {
   const cloze = useMemo(() => buildClozePrompt(card), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
   const [answers, setAnswers] = useState<string[]>(() => cloze.blanks.map(() => ""));
 
@@ -2604,6 +2611,9 @@ function ClozeAnswer({ card }: { card: StudyCard }) {
         <strong>{evaluation.correctCount}/{cloze.blanks.length} correct</strong>
         <span>Suggested rating: {ratingLabel(evaluation.suggestedRating)}</span>
         <small>{evaluation.message}</small>
+        {onRate && evaluation.filledCount === cloze.blanks.length && (
+          <button onClick={() => onRate(evaluation.suggestedRating)}>Apply suggested rating</button>
+        )}
       </div>
       {evaluation.results.some((result) => result.filled && !result.correct) && (
         <div className="cloze-corrections">
@@ -2748,7 +2758,7 @@ function ReviewView({
       </article>
       {showAnswer && (
         studyMode === "cloze" ? (
-          <ClozeAnswer card={card} />
+          <ClozeAnswer card={card} onRate={onRate} />
         ) : (
           <article className="answer-card">
             <h3>Answer</h3>
@@ -2924,7 +2934,7 @@ function FreePracticeView({
           </article>
           {showAnswer && (
             studyMode === "cloze" ? (
-              <ClozeAnswer card={card} />
+              <ClozeAnswer card={card} onRate={onRate} />
             ) : (
               <article className="answer-card">
                 <h3>Answer</h3>
@@ -2973,6 +2983,7 @@ function GraphView({
   onOpenCard: (card: StudyCard) => void;
   onOpenPageByName: (name: string) => void;
 }) {
+  const [zoom, setZoom] = useState(1);
   const layout = layoutGraph(snapshot.graph.nodes);
   const byId = new Map(layout.map((node) => [node.id, node]));
   const selectedCards = selectedNode ? cardsForGraphNode(snapshot.cards, selectedNode.id) : [];
@@ -2986,8 +2997,15 @@ function GraphView({
 
   return (
     <section className="graph-layout">
-      <div className="graph-scroll">
-        <svg className="graph" viewBox="0 0 980 620">
+      <div className="graph-panel">
+        <div className="graph-controls">
+          <button onClick={() => setZoom((current) => Math.max(0.6, Number((current - 0.2).toFixed(1))))}>−</button>
+          <span>{Math.round(zoom * 100)}%</span>
+          <button onClick={() => setZoom((current) => Math.min(2.4, Number((current + 0.2).toFixed(1))))}>+</button>
+          <button onClick={() => setZoom(1)}>Reset</button>
+        </div>
+        <div className="graph-scroll">
+        <svg className="graph" style={{ width: `${980 * zoom}px`, minHeight: `${620 * zoom}px` }} viewBox="0 0 980 620">
         {snapshot.graph.edges.map((edge) => {
           const source = byId.get(edge.source);
           const target = byId.get(edge.target);
@@ -3001,6 +3019,7 @@ function GraphView({
           </g>
         ))}
         </svg>
+        </div>
       </div>
       <aside className="details">
         {selectedNode ? (
