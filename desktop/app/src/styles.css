@@ -993,6 +993,30 @@ label {
   line-height: 1.35;
 }
 
+.todo-badges,
+.todo-metrics {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.todo-badges span,
+.todo-metrics span {
+  border: 1px solid rgba(178, 211, 210, 0.13);
+  border-radius: 999px;
+  padding: 3px 7px;
+  color: #a9c3c2;
+  background: rgba(255, 255, 255, 0.035);
+  font-size: 11px;
+  line-height: 1.2;
+}
+
+.todo-badges .warning {
+  border-color: rgba(245, 178, 90, 0.38);
+  color: #ffd49a;
+  background: rgba(245, 178, 90, 0.1);
+}
+
 .todo-actions {
   display: flex;
   flex-wrap: wrap;

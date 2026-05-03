@@ -91,6 +91,17 @@ interface SearchResult {
   haystack: string;
 }
 
+type TodoTargetKind = "block" | "deck" | "topic";
+
+interface TodoQueueMetrics {
+  totalCards: number;
+  dueCards: number;
+  newCards: number;
+  weakCards: number;
+  overdueCards: number;
+  estimatedMinutes: number;
+}
+
 interface TodoItem {
   id: string;
   pageId: string;
@@ -100,9 +111,14 @@ interface TodoItem {
   path: string[];
   status: TodoStatus;
   scope: "block" | "topic";
+  targetKind: TodoTargetKind;
   deck?: string;
   topic?: string;
   cardCount?: number;
+  learningNodeId?: string;
+  learningLabel?: string;
+  metrics: TodoQueueMetrics;
+  hint?: string;
 }
 
 interface SessionAnswerStat {
@@ -639,11 +655,12 @@ export function App() {
     setTodoStatus("Updating task...");
     try {
       let next = snapshot;
+      const doneAt = new Date().toISOString();
       for (const blockId of item.blockIds) {
         next = await setBlockProperty(blockId, "sgd-todo", status);
         if (status === "done") {
-          next = await setBlockProperty(blockId, "sgd-todo-done-at", new Date().toISOString());
-        } else if (item.blockIds.length === 1 && item.block.properties["sgd-todo-done-at"]) {
+          next = await setBlockProperty(blockId, "sgd-todo-done-at", doneAt);
+        } else {
           next = await removeBlockProperty(blockId, "sgd-todo-done-at");
         }
       }
@@ -914,13 +931,42 @@ export function App() {
   }
 
 
-  function openTodoItem(item: TodoItem) {
-    const practiceTarget = todoPracticeTarget(item, cards);
-    if (practiceTarget) {
-      startPractice("graph", "", practiceTarget.nodeId, practiceTarget.label);
+  function learnTodoItem(item: TodoItem) {
+    const learningTarget = todoLearningTarget(item, cards, settings);
+    setError(null);
+    setTodoStatus(null);
+
+    if (learningTarget.kind === "review") {
+      startDueReview(learningTarget.nodeId, learningTarget.label);
       return;
     }
-    setError("No learning topic found for this To Do item.");
+
+    if (learningTarget.kind === "practice") {
+      startPractice("graph", "", learningTarget.nodeId, learningTarget.label);
+      return;
+    }
+
+    openTodoSource(item);
+    setTodoStatus(learningTarget.message);
+  }
+
+  function openTodoSource(item: TodoItem) {
+    const sourceBlockId = item.blockIds.find((blockId) => blockLocations.has(blockId)) ?? item.block.id;
+    const location = blockLocations.get(sourceBlockId);
+    if (location) {
+      openBlock(location.pageId, sourceBlockId);
+      return;
+    }
+
+    const sourcePage = pages.find((page) => page.id === item.pageId || page.name === item.pageName);
+    if (sourcePage) {
+      setSelectedPageId(sourcePage.id);
+      setFocusedBlockId(null);
+      setScreen("notes");
+      return;
+    }
+
+    setError("Source block could not be found for this To Do item.");
   }
 
   function openCardSource(card: StudyCard) {
@@ -1267,8 +1313,8 @@ export function App() {
             onTargetPageChange={setTodoTargetPageId}
             onCreate={(content, pageId) => void createTodoFromQuickCapture(content, pageId)}
             onSetStatus={(item, status) => void updateTodoItemStatus(item, status)}
-            onOpenBlock={openTodoItem}
-            onEditBlock={(item) => openBlock(item.pageId, item.block.id)}
+            onLearnItem={learnTodoItem}
+            onEditBlock={openTodoSource}
           />
         )}
         {screen === "dashboard" && (
@@ -2494,7 +2540,7 @@ function TodoView({
   onTargetPageChange,
   onCreate,
   onSetStatus,
-  onOpenBlock,
+  onLearnItem,
   onEditBlock,
 }: {
   pages: Page[];
@@ -2506,7 +2552,7 @@ function TodoView({
   onTargetPageChange: (pageId: string) => void;
   onCreate: (content: string, pageId: string) => void;
   onSetStatus: (item: TodoItem, status: TodoStatus) => void;
-  onOpenBlock: (item: TodoItem) => void;
+  onLearnItem: (item: TodoItem) => void;
   onEditBlock: (item: TodoItem) => void;
 }) {
   const [filter, setFilter] = useState("");
@@ -2514,6 +2560,7 @@ function TodoView({
   const openItems = filteredItems.filter((item) => item.status === "open");
   const doingItems = filteredItems.filter((item) => item.status === "doing");
   const doneItems = filteredItems.filter((item) => item.status === "done");
+  const queueSummary = summarizeTodoMetrics(filteredItems.filter((item) => item.status !== "done"));
   const effectiveTargetPageId = targetPageId || pages[0]?.id || "";
 
   return (
@@ -2521,7 +2568,7 @@ function TodoView({
       <div className="todo-capture">
         <div>
           <h2>Learning Queue</h2>
-          <p>Open auto-lists unlearned card topics. Move items to Next up to control what appears in learning.</p>
+          <p>Open auto-lists new, due, weak, and overdue topics. Move items to Next up to steer today's learning.</p>
         </div>
         <div className="todo-input-row">
           <input
@@ -2549,12 +2596,16 @@ function TodoView({
         <span>{openItems.length} open</span>
         <span>{doingItems.length} next up</span>
         <span>{doneItems.length} done</span>
+        <span>{queueSummary.dueCards} due</span>
+        <span>{queueSummary.newCards} new</span>
+        <span>{queueSummary.weakCards} weak</span>
+        <span>~{queueSummary.estimatedMinutes} min</span>
       </div>
 
       <div className="todo-board">
-        <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} onEditBlock={onEditBlock} />
-        <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} onEditBlock={onEditBlock} />
-        <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onOpenBlock={onOpenBlock} onEditBlock={onEditBlock} />
+        <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
+        <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
+        <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
       </div>
     </section>
   );
@@ -2564,13 +2615,13 @@ function TodoColumn({
   title,
   items,
   onSetStatus,
-  onOpenBlock,
+  onLearnItem,
   onEditBlock,
 }: {
   title: string;
   items: TodoItem[];
   onSetStatus: (item: TodoItem, status: TodoStatus) => void;
-  onOpenBlock: (item: TodoItem) => void;
+  onLearnItem: (item: TodoItem) => void;
   onEditBlock: (item: TodoItem) => void;
 }) {
   return (
@@ -2584,16 +2635,27 @@ function TodoColumn({
       ) : (
         items.map((item) => (
           <article className={`todo-item ${item.status}`} key={item.id}>
-            <button className="todo-title" onClick={() => onOpenBlock(item)}>
+            <button className="todo-title" onClick={() => onLearnItem(item)}>
               {todoItemTitle(item)}
             </button>
+            <div className="todo-badges">
+              <span>{todoTargetLabel(item)}</span>
+              {item.hint && <span className="warning">{item.hint}</span>}
+            </div>
             <small>{todoItemSubtitle(item)}</small>
+            <div className="todo-metrics" aria-label="Queue metadata">
+              <span>{item.metrics.totalCards} cards</span>
+              <span>{item.metrics.dueCards} due</span>
+              <span>{item.metrics.newCards} new</span>
+              <span>{item.metrics.weakCards} weak</span>
+              <span>~{item.metrics.estimatedMinutes} min</span>
+            </div>
             <div className="todo-actions">
-              <button className="primary" onClick={() => onOpenBlock(item)}>Learn Topic</button>
+              <button className="primary" onClick={() => onLearnItem(item)}>{todoLearnButtonLabel(item)}</button>
               <button onClick={() => onEditBlock(item)}>Edit Source</button>
               <button disabled={item.status === "open"} onClick={() => onSetStatus(item, "open")}>Open</button>
               <button disabled={item.status === "doing"} onClick={() => onSetStatus(item, "doing")}>Next up</button>
-              <button className="success" disabled={item.status === "done"} onClick={() => onSetStatus(item, "done")}>Done</button>
+              <button className="success" disabled={item.status === "done"} onClick={() => onSetStatus(item, "done")}>{item.scope === "topic" ? "Done Topic" : "Done"}</button>
             </div>
           </article>
         ))
@@ -4802,6 +4864,8 @@ function buildTodoItems(pages: Page[], cards: StudyCard[]): TodoItem[] {
     if (!status) {
       continue;
     }
+    const target = todoBlockTarget(entry.page, entry.block, cards);
+    const metrics = buildTodoMetrics(target.cards);
     items.push({
       id: entry.block.id,
       pageId: entry.page.id,
@@ -4811,6 +4875,14 @@ function buildTodoItems(pages: Page[], cards: StudyCard[]): TodoItem[] {
       path: entry.path,
       status,
       scope: "block",
+      targetKind: target.targetKind,
+      deck: target.deck,
+      topic: target.topic,
+      cardCount: target.cards.length || undefined,
+      learningNodeId: target.nodeId,
+      learningLabel: target.label,
+      metrics,
+      hint: targetHint(metrics, false),
     });
   }
 
@@ -4825,9 +4897,11 @@ function buildTodoItems(pages: Page[], cards: StudyCard[]): TodoItem[] {
   }
 
   for (const [key, group] of topicGroups) {
-    const statuses = group.map(({ card }) => todoStatusForCard(card)).filter((status): status is TodoStatus => Boolean(status));
-    const hasUnlearnedCards = group.some(({ card }) => isUnlearnedCard(card));
-    if (!hasUnlearnedCards && statuses.length === 0) {
+    const topicCards = group.map(({ card }) => card);
+    const statuses = topicCards.map(todoStatusForCard).filter((status): status is TodoStatus => Boolean(status));
+    const metrics = buildTodoMetrics(topicCards);
+    const hasQueueSignal = metrics.newCards > 0 || metrics.dueCards > 0 || metrics.weakCards > 0;
+    if (!hasQueueSignal && statuses.length === 0) {
       continue;
     }
 
@@ -4842,19 +4916,26 @@ function buildTodoItems(pages: Page[], cards: StudyCard[]): TodoItem[] {
       pageId: first.entry.page.id,
       pageName: first.entry.page.name,
       block: first.entry.block,
-      blockIds: group.map(({ card }) => card.block_id),
+      blockIds: uniqueStrings(group.map(({ card }) => card.block_id)),
       path: [first.card.deck, first.card.topic],
       status,
       scope: "topic",
+      targetKind: "topic",
       deck: first.card.deck,
       topic: first.card.topic,
       cardCount: group.length,
+      learningNodeId: `topic:${key}`,
+      learningLabel: `${first.card.deck} / ${first.card.topic}`,
+      metrics,
+      hint: targetHint(metrics, true),
     });
   }
 
   return items.sort((left, right) => {
     const statusCompare = todoStatusOrder(left.status) - todoStatusOrder(right.status);
     if (statusCompare !== 0) return statusCompare;
+    const urgencyCompare = todoUrgencyScore(right) - todoUrgencyScore(left);
+    if (urgencyCompare !== 0) return urgencyCompare;
     const titleCompare = todoItemTitle(left).localeCompare(todoItemTitle(right));
     if (titleCompare !== 0) return titleCompare;
     return left.pageName.localeCompare(right.pageName);
@@ -4918,7 +4999,7 @@ function filterTodoItems(items: TodoItem[], query: string) {
     return items;
   }
   return items.filter((item) =>
-    normalizeSearchText(`${item.block.content} ${item.pageName} ${item.path.join(" ")}`).includes(normalized),
+    normalizeSearchText(`${item.block.content} ${item.pageName} ${item.path.join(" ")} ${item.deck ?? ""} ${item.topic ?? ""} ${item.hint ?? ""}`).includes(normalized),
   );
 }
 
@@ -4929,23 +5010,190 @@ function stripTodoPrefix(value: string) {
     .trim() || "Untitled task";
 }
 
-function todoPracticeTarget(item: TodoItem, cards: StudyCard[]) {
-  if (item.scope === "topic") {
+function todoLearningTarget(item: TodoItem, cards: StudyCard[], settings: AppSettings) {
+  const nodeId = item.learningNodeId;
+  if (!nodeId) {
     return {
-      nodeId: item.id,
-      label: `${item.deck ?? "Deck"} / ${item.topic ?? "Topic"}`,
+      kind: "source" as const,
+      message: "No deck or topic target found, so the source block was opened instead.",
     };
   }
 
-  const relatedCard = cards.find((card) => card.source_page === item.pageName);
-  if (!relatedCard) {
-    return null;
+  const scopedCards = cardsForGraphNode(cards, nodeId).filter((card) => todoStatusForCard(card) !== "done");
+  if (scopedCards.length === 0) {
+    return {
+      kind: "source" as const,
+      message: "This target has no active cards left, so the source block was opened instead.",
+    };
+  }
+
+  const dueQueue = buildReviewQueue(cards, nodeId, settings);
+  if (dueQueue.length > 0) {
+    return {
+      kind: "review" as const,
+      nodeId,
+      label: item.learningLabel ?? todoItemTitle(item),
+    };
   }
 
   return {
-    nodeId: `topic:${relatedCard.deck_slug}:${relatedCard.topic_slug}`,
-    label: `${relatedCard.deck} / ${relatedCard.topic}`,
+    kind: "practice" as const,
+    nodeId,
+    label: item.learningLabel ?? todoItemTitle(item),
   };
+}
+
+function todoBlockTarget(page: Page, block: Block, cards: StudyCard[]) {
+  const blockDeck = singleLine(block.properties["sgd-deck"] ?? block.properties.deck ?? "", "");
+  const pageDeck = singleLine(page.properties["sgd-deck"] ?? page.properties.deck ?? "", "");
+  const deck = blockDeck || pageDeck;
+  const blockTopic = singleLine(block.properties["sgd-topic"] ?? block.properties.topic ?? "", "");
+  const pageTopic = singleLine(page.properties["sgd-topic"] ?? page.properties.topic ?? "", "");
+  const topic = blockTopic || pageTopic;
+
+  if (deck && topic) {
+    const nodeId = `topic:${normalizeSlug(deck)}:${normalizeSlug(topic)}`;
+    const targetCards = cardsForGraphNode(cards, nodeId);
+    return {
+      targetKind: "topic" as const,
+      nodeId,
+      label: `${deck} / ${topic}`,
+      deck,
+      topic,
+      cards: targetCards,
+    };
+  }
+
+  if (deck) {
+    const nodeId = `deck:${normalizeSlug(deck)}`;
+    const targetCards = cardsForGraphNode(cards, nodeId);
+    return {
+      targetKind: "deck" as const,
+      nodeId,
+      label: deck,
+      deck,
+      cards: targetCards,
+    };
+  }
+
+  const linkedPageNames = pageLinksInText(block.content);
+  const directCards = cards.filter((card) =>
+    card.source_page === page.name ||
+    linkedPageNames.some((linkedPage) => normalizePageRef(linkedPage) === normalizePageRef(card.source_page ?? "")),
+  );
+  const uniqueTopics = uniqueStrings(directCards.map((card) => `${card.deck_slug}:${card.topic_slug}`));
+  if (uniqueTopics.length === 1) {
+    const firstCard = directCards[0];
+    const nodeId = `topic:${uniqueTopics[0]}`;
+    return {
+      targetKind: "topic" as const,
+      nodeId,
+      label: `${firstCard.deck} / ${firstCard.topic}`,
+      deck: firstCard.deck,
+      topic: firstCard.topic,
+      cards: cardsForGraphNode(cards, nodeId),
+    };
+  }
+
+  const uniqueDecks = uniqueStrings(directCards.map((card) => card.deck_slug));
+  if (uniqueDecks.length === 1) {
+    const firstCard = directCards[0];
+    const nodeId = `deck:${firstCard.deck_slug}`;
+    return {
+      targetKind: "deck" as const,
+      nodeId,
+      label: firstCard.deck,
+      deck: firstCard.deck,
+      cards: cardsForGraphNode(cards, nodeId),
+    };
+  }
+
+  return {
+    targetKind: "block" as const,
+    cards: directCards,
+  };
+}
+
+function buildTodoMetrics(cards: StudyCard[]): TodoQueueMetrics {
+  const activeCards = cards.filter((card) => todoStatusForCard(card) !== "done");
+  const dueCards = activeCards.filter(isDue);
+  const newCards = activeCards.filter(isNewCard);
+  const weakCards = activeCards.filter(isWeak);
+  const overdueCards = dueCards.filter((card) => !isNewCard(card));
+  return {
+    totalCards: activeCards.length,
+    dueCards: dueCards.length,
+    newCards: newCards.length,
+    weakCards: weakCards.length,
+    overdueCards: overdueCards.length,
+    estimatedMinutes: estimateQueueMinutes(activeCards),
+  };
+}
+
+function summarizeTodoMetrics(items: TodoItem[]): TodoQueueMetrics {
+  return items.reduce<TodoQueueMetrics>((summary, item) => ({
+    totalCards: summary.totalCards + item.metrics.totalCards,
+    dueCards: summary.dueCards + item.metrics.dueCards,
+    newCards: summary.newCards + item.metrics.newCards,
+    weakCards: summary.weakCards + item.metrics.weakCards,
+    overdueCards: summary.overdueCards + item.metrics.overdueCards,
+    estimatedMinutes: summary.estimatedMinutes + item.metrics.estimatedMinutes,
+  }), { totalCards: 0, dueCards: 0, newCards: 0, weakCards: 0, overdueCards: 0, estimatedMinutes: 0 });
+}
+
+function estimateQueueMinutes(cards: StudyCard[]) {
+  const minutes = cards.reduce((total, card) => {
+    if (isNewCard(card)) return total + 2;
+    if (isWeak(card)) return total + 2;
+    if (isDue(card)) return total + 1;
+    return total + 1;
+  }, 0);
+  return Math.max(cards.length > 0 ? 1 : 0, minutes);
+}
+
+function targetHint(metrics: TodoQueueMetrics, automaticTopic: boolean) {
+  if (metrics.weakCards > 0 && metrics.overdueCards > 0) return "Weak + overdue";
+  if (metrics.weakCards > 0) return automaticTopic ? "Weak topic" : "Weak cards";
+  if (metrics.overdueCards > 0) return automaticTopic ? "Overdue topic" : "Overdue";
+  if (metrics.newCards > 0) return automaticTopic ? "New topic" : "New cards";
+  return undefined;
+}
+
+function todoUrgencyScore(item: TodoItem) {
+  return item.metrics.overdueCards * 8 + item.metrics.weakCards * 5 + item.metrics.dueCards * 3 + item.metrics.newCards;
+}
+
+function todoTargetLabel(item: TodoItem) {
+  if (item.targetKind === "topic") return "Topic target";
+  if (item.targetKind === "deck") return "Deck target";
+  return "Block target";
+}
+
+function todoLearnButtonLabel(item: TodoItem) {
+  if (!item.learningNodeId) return "Open Source";
+  if (item.metrics.dueCards > 0) return "Review Due";
+  if (item.targetKind === "deck") return "Practice Deck";
+  if (item.targetKind === "topic") return "Practice Topic";
+  return "Learn";
+}
+
+function uniqueStrings(values: string[]) {
+  const seen = new Set<string>();
+  return values.filter((value) => {
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function pageLinksInText(value: string) {
+  const links: string[] = [];
+  const linkPattern = /\[\[([^\]]+)\]\]/g;
+  let match: RegExpExecArray | null;
+  while ((match = linkPattern.exec(value)) !== null) {
+    links.push(normalizePageTitle(match[1]));
+  }
+  return uniqueStrings(links);
 }
 
 function todoItemTitle(item: TodoItem) {
