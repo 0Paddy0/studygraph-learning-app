@@ -304,48 +304,110 @@ export function buildPracticeQueue(cards: StudyCard[], mode: PracticeMode, deckS
   });
 }
 
+interface GraphCardIndex {
+  byDeck: Map<string, StudyCard[]>;
+  byTopic: Map<string, StudyCard[]>;
+  byCard: Map<string, StudyCard[]>;
+  byConcept: Map<string, StudyCard[]>;
+  bySource: Map<string, StudyCard[]>;
+  weak: StudyCard[];
+  overdue: StudyCard[];
+  newCards: StudyCard[];
+}
+
+const graphCardIndexCache = new WeakMap<StudyCard[], GraphCardIndex>();
+
 export function cardsForGraphNode(cards: StudyCard[], nodeId: string) {
+  const index = graphCardIndexFor(cards);
+
   if (nodeId.startsWith("deck:")) {
-    const deckSlug = nodeId.slice("deck:".length);
-    return cards.filter((card) => card.deck_slug === deckSlug);
+    return [...(index.byDeck.get(nodeId.slice("deck:".length)) ?? [])];
   }
 
   if (nodeId.startsWith("topic:")) {
     const [, deckSlug, topicSlug] = nodeId.split(":");
-    return cards.filter((card) => card.deck_slug === deckSlug && card.topic_slug === topicSlug);
+    return [...(index.byTopic.get(`${deckSlug}:${topicSlug}`) ?? [])];
   }
 
   if (nodeId.startsWith("card:")) {
-    const cardId = nodeId.slice("card:".length);
-    return cards.filter((card) => card.id === cardId);
+    return [...(index.byCard.get(nodeId.slice("card:".length)) ?? [])];
   }
 
   if (nodeId === "concept:weak-cards") {
-    return cards.filter(isWeak);
+    return [...index.weak];
   }
 
   if (nodeId === "concept:overdue-cards") {
-    return cards.filter(isOverdue);
+    return [...index.overdue];
   }
 
   if (nodeId === "concept:new-cards") {
-    return cards.filter(isNewCard);
+    return [...index.newCards];
   }
 
   if (nodeId.startsWith("concept:")) {
-    const conceptSlug = nodeId.slice("concept:".length);
-    return cards.filter((card) =>
-      card.linked_pages.some((page) => normalizeSlug(page) === conceptSlug) ||
-      card.tags.some((tag) => normalizeSlug(`#${tag}`) === conceptSlug),
-    );
+    return [...(index.byConcept.get(nodeId.slice("concept:".length)) ?? [])];
   }
 
   if (nodeId.startsWith("source:")) {
-    const sourceSlug = nodeId.slice("source:".length);
-    return cards.filter((card) => card.source_page ? normalizeSlug(card.source_page) === sourceSlug : false);
+    return [...(index.bySource.get(nodeId.slice("source:".length)) ?? [])];
   }
 
   return [];
+}
+
+function graphCardIndexFor(cards: StudyCard[]): GraphCardIndex {
+  const cached = graphCardIndexCache.get(cards);
+  if (cached) return cached;
+
+  const index: GraphCardIndex = {
+    byDeck: new Map(),
+    byTopic: new Map(),
+    byCard: new Map(),
+    byConcept: new Map(),
+    bySource: new Map(),
+    weak: [],
+    overdue: [],
+    newCards: [],
+  };
+
+  for (const card of cards) {
+    pushIndexed(index.byDeck, card.deck_slug, card);
+    pushIndexed(index.byTopic, `${card.deck_slug}:${card.topic_slug}`, card);
+    pushIndexed(index.byCard, card.id, card);
+
+    for (const page of card.linked_pages) {
+      const lower = page.toLocaleLowerCase();
+      if (!lower.startsWith("deck/") && !lower.startsWith("topic/")) {
+        pushIndexed(index.byConcept, normalizeSlug(page), card);
+      }
+    }
+    for (const tag of card.tags) {
+      const lower = tag.toLocaleLowerCase();
+      if (lower !== "card" && !lower.startsWith("deck/") && !lower.startsWith("topic/")) {
+        pushIndexed(index.byConcept, normalizeSlug(`#${tag}`), card);
+      }
+    }
+    if (card.source_page) {
+      pushIndexed(index.bySource, normalizeSlug(card.source_page), card);
+    }
+    if (isWeak(card)) index.weak.push(card);
+    if (isOverdue(card)) index.overdue.push(card);
+    if (isNewCard(card)) index.newCards.push(card);
+  }
+
+  graphCardIndexCache.set(cards, index);
+  return index;
+}
+
+function pushIndexed(index: Map<string, StudyCard[]>, key: string, card: StudyCard) {
+  if (!key) return;
+  const current = index.get(key);
+  if (current) {
+    if (!current.some((item) => item.id === card.id)) current.push(card);
+  } else {
+    index.set(key, [card]);
+  }
 }
 
 export function uniqueCards(cards: StudyCard[]) {

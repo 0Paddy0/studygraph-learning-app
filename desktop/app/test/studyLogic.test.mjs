@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   buildReviewQueue,
   buildTodoItems,
+  cardsForGraphNode,
   clozeAnswerMatches,
   evaluateClozeAnswers,
   filterGraphForView,
@@ -109,6 +110,20 @@ test("todo items infer learning targets from linked source pages and route to re
 
   const summary = summarizeTodoMetrics(items.filter((item) => item.status !== "done"));
   assert.equal(summary.dueCards >= 1, true);
+});
+
+test("graph card lookup uses concepts, sources, and returns copy-safe arrays", () => {
+  const conceptCard = card({ id: "concept", linked_pages: ["Rust Ownership"], tags: ["systems"], source_page: "Rust Book" });
+  const weakCard = card({ id: "weak-cache", tags: ["systems"], srs: { ease: 1.3, reps: 4 } });
+  const cards = [conceptCard, weakCard];
+
+  const firstLookup = cardsForGraphNode(cards, "concept:systems");
+  firstLookup.pop();
+
+  assert.deepEqual(cardsForGraphNode(cards, "concept:systems").map((item) => item.id), ["concept", "weak-cache"]);
+  assert.deepEqual(cardsForGraphNode(cards, "concept:rust-ownership").map((item) => item.id), ["concept"]);
+  assert.deepEqual(cardsForGraphNode(cards, "source:rust-book").map((item) => item.id), ["concept"]);
+  assert.deepEqual(cardsForGraphNode(cards, "concept:weak-cards").map((item) => item.id), ["weak-cache"]);
 });
 
 test("graph filters keep only matching deck/status cards and connected parents", () => {

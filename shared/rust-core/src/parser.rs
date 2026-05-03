@@ -30,17 +30,31 @@ pub fn scan_cards_from_pages(pages: &[Page]) -> (Vec<StudyCard>, Vec<ParseWarnin
         }
     }
 
+    let mut seen_ids = BTreeSet::new();
+    let mut seen_fingerprints = BTreeSet::new();
+    cards.retain(|card| {
+        let fingerprint = card_fingerprint(card);
+        if !seen_ids.insert(card.id) || !seen_fingerprints.insert(fingerprint) {
+            warnings.push(ParseWarning {
+                message: format!("Duplicate card '{}' was ignored.", card.question),
+            });
+            false
+        } else {
+            true
+        }
+    });
     cards.sort_by(|left, right| left.question.cmp(&right.question));
-    cards.dedup_by_key(|card| card.id);
 
     (cards, warnings)
 }
 
 pub fn parse_logseq_markdown_page(name: &str, markdown: &str) -> Page {
     let mut page_name = name.trim().to_string();
+    let mut page_id = Uuid::new_v4();
     let mut page_properties = BTreeMap::new();
     let mut flat_blocks: Vec<FlatBlock> = Vec::new();
     let mut depth_stack: Vec<usize> = Vec::new();
+    let mut seen_block_ids = BTreeSet::new();
     let mut seen_block = false;
 
     for raw_line in markdown.lines() {
@@ -57,15 +71,26 @@ pub fn parse_logseq_markdown_page(name: &str, markdown: &str) -> Page {
         }
 
         if let Some((key, value)) = parse_property_line(trimmed) {
+            let key = normalize_property_key(&key);
             if seen_block || leading_spaces > 0 {
                 if let Some(target_index) = target_block_for_property(leading_spaces, &depth_stack)
                 {
-                    flat_blocks[target_index]
-                        .properties
-                        .insert(normalize_property_key(&key), value);
+                    if key == "id" {
+                        if let Ok(parsed_id) = Uuid::parse_str(&value) {
+                            if seen_block_ids.insert(parsed_id) {
+                                flat_blocks[target_index].id = parsed_id;
+                            }
+                        }
+                    }
+                    flat_blocks[target_index].properties.insert(key, value);
                 }
             } else {
-                page_properties.insert(normalize_property_key(&key), value);
+                if key == "id" {
+                    if let Ok(parsed_id) = Uuid::parse_str(&value) {
+                        page_id = parsed_id;
+                    }
+                }
+                page_properties.insert(key, value);
             }
             continue;
         }
@@ -82,8 +107,10 @@ pub fn parse_logseq_markdown_page(name: &str, markdown: &str) -> Page {
                 depth_stack.get(depth - 1).copied()
             };
             let index = flat_blocks.len();
+            let id = Uuid::new_v4();
+            seen_block_ids.insert(id);
             flat_blocks.push(FlatBlock {
-                id: Uuid::new_v4(),
+                id,
                 content: content.trim().to_string(),
                 properties: BTreeMap::new(),
                 parent,
@@ -105,11 +132,22 @@ pub fn parse_logseq_markdown_page(name: &str, markdown: &str) -> Page {
     let blocks = build_tree(&flat_blocks, None);
 
     Page {
-        id: Uuid::new_v4(),
+        id: page_id,
         name: page_name,
         properties: page_properties,
         blocks,
     }
+}
+
+fn card_fingerprint(card: &StudyCard) -> String {
+    format!(
+        "{}\u{1f}{}\u{1f}{}\u{1f}{}\u{1f}{}",
+        card.source_page.as_deref().unwrap_or_default(),
+        card.deck_slug,
+        card.topic_slug,
+        card.question,
+        card.answer_markdown
+    )
 }
 
 pub fn block_contains_card_marker(block: &Block) -> bool {
@@ -553,6 +591,40 @@ mod tests {
             cards[0].answer_markdown,
             "- A type that can be one of several alternatives."
         );
+    }
+
+    #[test]
+    fn preserves_logseq_page_and_block_ids() {
+        let page_id = Uuid::new_v4();
+        let block_id = Uuid::new_v4();
+        let page = parse_logseq_markdown_page(
+            "IDs",
+            &format!(
+                "# IDs\nid:: {page_id}\n- Stable card #card\n  id:: {block_id}\n  - Stable answer"
+            ),
+        );
+
+        assert_eq!(page.id, page_id);
+        assert_eq!(page.blocks[0].id, block_id);
+
+        let (cards, warnings) = scan_cards_from_pages(&[page]);
+        assert!(warnings.is_empty());
+        assert_eq!(cards[0].id, block_id);
+    }
+
+    #[test]
+    fn ignores_duplicate_cards_by_id_or_roundtrip_fingerprint() {
+        let block_id = Uuid::new_v4();
+        let duplicate = format!(
+            "- Same question #card\n  id:: {block_id}\n  sgd-deck:: Rust\n  - Same answer\n- Same question #card\n  id:: {block_id}\n  sgd-deck:: Rust\n  - Same answer\n- Same question #card\n  sgd-deck:: Rust\n  - Same answer"
+        );
+        let page = parse_logseq_markdown_page("Duplicates", &duplicate);
+
+        let (cards, warnings) = scan_cards_from_pages(&[page]);
+
+        assert_eq!(cards.len(), 1);
+        assert_eq!(cards[0].id, block_id);
+        assert_eq!(warnings.len(), 2);
     }
 
     #[test]

@@ -54,48 +54,29 @@ pub fn build_study_graph(cards: &[StudyCard]) -> StudyGraphData {
     let mut edges: BTreeMap<String, StudyGraphEdge> = BTreeMap::new();
 
     for card in cards {
+        let card_due = is_due(card, now);
+        let card_weak = is_weak(card);
         let deck_id = deck_node_id(&card.deck_slug);
         let topic_id = topic_node_id(&card.deck_slug, &card.topic_slug);
         let card_id = card_node_id(&card.id.to_string());
 
-        upsert_node(
+        upsert_summary_node(
             &mut nodes,
-            StudyGraphNode {
-                id: deck_id.clone(),
-                kind: StudyGraphNodeKind::Deck,
-                label: card.deck.clone(),
-                total_cards: 0,
-                due_cards: 0,
-                weak_cards: 0,
-            },
-            card,
+            &deck_id,
+            StudyGraphNodeKind::Deck,
+            &card.deck,
+            card_due,
+            card_weak,
         );
-
-        upsert_node(
+        upsert_summary_node(
             &mut nodes,
-            StudyGraphNode {
-                id: topic_id.clone(),
-                kind: StudyGraphNodeKind::Topic,
-                label: card.topic.clone(),
-                total_cards: 0,
-                due_cards: 0,
-                weak_cards: 0,
-            },
-            card,
+            &topic_id,
+            StudyGraphNodeKind::Topic,
+            &card.topic,
+            card_due,
+            card_weak,
         );
-
-        upsert_node(
-            &mut nodes,
-            StudyGraphNode {
-                id: card_id.clone(),
-                kind: StudyGraphNodeKind::Card,
-                label: card.question.clone(),
-                total_cards: 0,
-                due_cards: 0,
-                weak_cards: 0,
-            },
-            card,
-        );
+        upsert_card_node(&mut nodes, &card_id, card, card_due, card_weak);
 
         insert_edge(
             &mut edges,
@@ -119,24 +100,21 @@ pub fn build_study_graph(cards: &[StudyCard]) -> StudyGraphData {
             );
         }
 
+        let mut seen_concept_slugs = BTreeSet::new();
         for concept in concept_labels(card) {
             let concept_slug = normalize_slug(&concept);
-            if concept_slug.is_empty() {
+            if concept_slug.is_empty() || !seen_concept_slugs.insert(concept_slug.clone()) {
                 continue;
             }
 
             let concept_id = concept_node_id(&concept_slug);
-            upsert_node(
+            upsert_summary_node(
                 &mut nodes,
-                StudyGraphNode {
-                    id: concept_id.clone(),
-                    kind: StudyGraphNodeKind::Concept,
-                    label: concept,
-                    total_cards: 0,
-                    due_cards: 0,
-                    weak_cards: 0,
-                },
-                card,
+                &concept_id,
+                StudyGraphNodeKind::Concept,
+                &concept,
+                card_due,
+                card_weak,
             );
             insert_edge(
                 &mut edges,
@@ -150,17 +128,13 @@ pub fn build_study_graph(cards: &[StudyCard]) -> StudyGraphData {
             let source_slug = normalize_slug(source_page);
             if !source_slug.is_empty() {
                 let source_id = source_node_id(&source_slug);
-                upsert_node(
+                upsert_summary_node(
                     &mut nodes,
-                    StudyGraphNode {
-                        id: source_id.clone(),
-                        kind: StudyGraphNodeKind::Source,
-                        label: source_page.clone(),
-                        total_cards: 0,
-                        due_cards: 0,
-                        weak_cards: 0,
-                    },
-                    card,
+                    &source_id,
+                    StudyGraphNodeKind::Source,
+                    source_page,
+                    card_due,
+                    card_weak,
                 );
                 insert_edge(
                     &mut edges,
@@ -171,35 +145,18 @@ pub fn build_study_graph(cards: &[StudyCard]) -> StudyGraphData {
             }
         }
 
-        if is_weak(card) {
+        if card_weak {
             let weak_id = "concept:weak-cards".to_string();
-            upsert_node(
+            upsert_summary_node(
                 &mut nodes,
-                StudyGraphNode {
-                    id: weak_id.clone(),
-                    kind: StudyGraphNodeKind::Concept,
-                    label: "Weak Cards".to_string(),
-                    total_cards: 0,
-                    due_cards: 0,
-                    weak_cards: 0,
-                },
-                card,
+                &weak_id,
+                StudyGraphNodeKind::Concept,
+                "Weak Cards",
+                card_due,
+                card_weak,
             );
             insert_edge(&mut edges, weak_id, card_id, StudyGraphEdgeKind::Related);
         }
-    }
-
-    for node in nodes.values_mut() {
-        if node.kind == StudyGraphNodeKind::Card {
-            continue;
-        }
-        let related_cards = cards_for_node(node, cards);
-        node.total_cards = related_cards.len() as u32;
-        node.due_cards = related_cards
-            .iter()
-            .filter(|card| is_due(card, now))
-            .count() as u32;
-        node.weak_cards = related_cards.iter().filter(|card| is_weak(card)).count() as u32;
     }
 
     StudyGraphData {
@@ -208,17 +165,46 @@ pub fn build_study_graph(cards: &[StudyCard]) -> StudyGraphData {
     }
 }
 
-fn upsert_node(
+fn upsert_summary_node(
     nodes: &mut BTreeMap<String, StudyGraphNode>,
-    mut node: StudyGraphNode,
-    card: &StudyCard,
+    id: &str,
+    kind: StudyGraphNodeKind,
+    label: &str,
+    due: bool,
+    weak: bool,
 ) {
-    if node.kind == StudyGraphNodeKind::Card {
-        node.total_cards = 1;
-        node.due_cards = u32::from(is_due(card, Utc::now()));
-        node.weak_cards = u32::from(is_weak(card));
-    }
-    nodes.entry(node.id.clone()).or_insert(node);
+    let node = nodes
+        .entry(id.to_string())
+        .or_insert_with(|| StudyGraphNode {
+            id: id.to_string(),
+            kind,
+            label: label.to_string(),
+            total_cards: 0,
+            due_cards: 0,
+            weak_cards: 0,
+        });
+    node.total_cards += 1;
+    node.due_cards += u32::from(due);
+    node.weak_cards += u32::from(weak);
+}
+
+fn upsert_card_node(
+    nodes: &mut BTreeMap<String, StudyGraphNode>,
+    id: &str,
+    card: &StudyCard,
+    due: bool,
+    weak: bool,
+) {
+    nodes
+        .entry(id.to_string())
+        .or_insert_with(|| StudyGraphNode {
+            id: id.to_string(),
+            kind: StudyGraphNodeKind::Card,
+            label: card.question.clone(),
+            total_cards: 1,
+            due_cards: u32::from(due),
+            weak_cards: u32::from(weak),
+        });
 }
 
 fn insert_edge(
@@ -234,45 +220,6 @@ fn insert_edge(
         target,
         kind,
     });
-}
-
-fn cards_for_node<'a>(node: &StudyGraphNode, cards: &'a [StudyCard]) -> Vec<&'a StudyCard> {
-    match node.kind {
-        StudyGraphNodeKind::Deck => cards
-            .iter()
-            .filter(|card| node.id == deck_node_id(&card.deck_slug))
-            .collect(),
-        StudyGraphNodeKind::Topic => cards
-            .iter()
-            .filter(|card| node.id == topic_node_id(&card.deck_slug, &card.topic_slug))
-            .collect(),
-        StudyGraphNodeKind::Concept => {
-            if node.id == "concept:weak-cards" {
-                cards.iter().filter(|card| is_weak(card)).collect()
-            } else {
-                cards
-                    .iter()
-                    .filter(|card| {
-                        concept_labels(card)
-                            .iter()
-                            .any(|concept| node.id == concept_node_id(&normalize_slug(concept)))
-                    })
-                    .collect()
-            }
-        }
-        StudyGraphNodeKind::Source => cards
-            .iter()
-            .filter(|card| {
-                card.source_page
-                    .as_ref()
-                    .is_some_and(|source| node.id == source_node_id(&normalize_slug(source)))
-            })
-            .collect(),
-        StudyGraphNodeKind::Card => cards
-            .iter()
-            .filter(|card| node.id == card_node_id(&card.id.to_string()))
-            .collect(),
-    }
 }
 
 fn concept_labels(card: &StudyCard) -> Vec<String> {
@@ -341,5 +288,74 @@ mod tests {
         assert!(node_ids.contains(&"concept:stop-loss"));
         assert!(node_ids.contains(&"concept:risk"));
         assert!(node_ids.contains(&"source:trading-notes"));
+
+        let deck = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "deck:trading")
+            .unwrap();
+        assert_eq!(deck.total_cards, 1);
+    }
+
+    #[test]
+    fn counts_same_concept_slug_once_per_card() {
+        let page = parse_logseq_markdown_page(
+            "Risk",
+            "- Define risk #card [[Risk]] #risk\n  - Exposure to loss.",
+        );
+        let (cards, warnings) = scan_cards_from_pages(&[page]);
+
+        assert!(warnings.is_empty());
+
+        let graph = build_study_graph(&cards);
+        let concept = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "concept:risk")
+            .unwrap();
+        assert_eq!(concept.total_cards, 1);
+    }
+
+    #[test]
+    fn summarizes_large_graph_without_duplicate_edges() {
+        let mut markdown = String::new();
+        for index in 0..750 {
+            markdown.push_str(&format!(
+                "- Card {index} #card [[Concept {}]] #batch\n  sgd-deck:: Big Deck\n  sgd-topic:: Topic {}\n  - Answer {index}\n",
+                index % 25,
+                index % 10
+            ));
+        }
+        let page = parse_logseq_markdown_page("Large", &markdown);
+        let (cards, warnings) = scan_cards_from_pages(&[page]);
+
+        assert_eq!(cards.len(), 750);
+        assert!(warnings.is_empty());
+
+        let graph = build_study_graph(&cards);
+        let deck = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "deck:big-deck")
+            .unwrap();
+        assert_eq!(deck.total_cards, 750);
+        assert_eq!(
+            graph
+                .nodes
+                .iter()
+                .find(|node| node.id == "concept:batch")
+                .unwrap()
+                .total_cards,
+            750
+        );
+        assert_eq!(
+            graph
+                .edges
+                .iter()
+                .map(|edge| &edge.id)
+                .collect::<BTreeSet<_>>()
+                .len(),
+            graph.edges.len()
+        );
     }
 }

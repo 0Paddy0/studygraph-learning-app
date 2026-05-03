@@ -502,14 +502,33 @@ impl StudyGraphStorage {
     }
 
     pub fn load_cards(&self, workspace_id: Uuid) -> StorageResult<Vec<StudyCard>> {
+        let missing_srs: i64 = self.conn.query_row(
+            "
+            SELECT COUNT(*)
+            FROM cards AS c
+            LEFT JOIN srs_states AS s ON s.card_id = c.id
+            WHERE c.workspace_id = ?1 AND s.card_id IS NULL
+            ",
+            params![workspace_id.to_string()],
+            |row| row.get(0),
+        )?;
+        if missing_srs > 0 {
+            return Err(StorageError::DataIntegrity(format!(
+                "{missing_srs} indexed card(s) are missing SRS state"
+            )));
+        }
+
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, block_id, question, answer_markdown, deck, deck_slug, topic,
-                   topic_slug, source_page, linked_pages_json, tags_json, raw_content,
-                   properties_json, incomplete
-            FROM cards
-            WHERE workspace_id = ?1
-            ORDER BY deck, topic, question
+            SELECT c.id, c.block_id, c.question, c.answer_markdown, c.deck, c.deck_slug,
+                   c.topic, c.topic_slug, c.source_page, c.linked_pages_json, c.tags_json,
+                   c.raw_content, c.properties_json, c.incomplete,
+                   s.state, s.due_at, s.interval_days, s.ease, s.reps, s.lapses,
+                   s.last_reviewed_at, s.last_rating, s.hard_count, s.created_at
+            FROM cards AS c
+            JOIN srs_states AS s ON s.card_id = c.id
+            WHERE c.workspace_id = ?1
+            ORDER BY c.deck, c.topic, c.question
             ",
         )?;
         let rows = stmt.query_map(params![workspace_id.to_string()], |row| {
@@ -528,6 +547,18 @@ impl StudyGraphStorage {
                 raw_content: row.get(11)?,
                 properties_json: row.get(12)?,
                 incomplete: row.get::<_, i64>(13)? != 0,
+                srs: StoredSrsRow {
+                    state: row.get(14)?,
+                    due_at: row.get(15)?,
+                    interval_days: row.get::<_, i64>(16)?,
+                    ease: row.get::<_, f64>(17)?,
+                    reps: row.get::<_, i64>(18)?,
+                    lapses: row.get::<_, i64>(19)?,
+                    last_reviewed_at: row.get(20)?,
+                    last_rating: row.get(21)?,
+                    hard_count: row.get::<_, i64>(22)?,
+                    created_at: row.get(23)?,
+                },
             })
         })?;
 
@@ -535,9 +566,6 @@ impl StudyGraphStorage {
         for row in rows {
             let row = row?;
             let card_id = Uuid::parse_str(&row.id)?;
-            let srs = self.load_srs_state(card_id)?.ok_or_else(|| {
-                StorageError::DataIntegrity(format!("missing SRS state for indexed card {card_id}"))
-            })?;
             cards.push(StudyCard {
                 id: card_id,
                 block_id: Uuid::parse_str(&row.block_id)?,
@@ -552,7 +580,7 @@ impl StudyGraphStorage {
                 tags: serde_json::from_str(&row.tags_json)?,
                 raw_content: row.raw_content,
                 properties: serde_json::from_str(&row.properties_json)?,
-                srs,
+                srs: srs_from_row(row.srs)?,
                 incomplete: row.incomplete,
             });
         }
@@ -1192,7 +1220,7 @@ impl StudyGraphStorage {
             flat.push(row?);
         }
 
-        build_block_tree(&flat, None)
+        build_block_tree(flat)
     }
 
     fn save_doc_page(&self, page: &DocPage, position: i64) -> StorageResult<()> {
@@ -1571,17 +1599,31 @@ fn srs_from_row(row: StoredSrsRow) -> StorageResult<SrsState> {
     })
 }
 
-fn build_block_tree(flat: &[StoredBlockRow], parent_id: Option<&str>) -> StorageResult<Vec<Block>> {
-    let mut blocks = Vec::new();
-    for row in flat
-        .iter()
-        .filter(|row| row.parent_id.as_deref() == parent_id)
-    {
+fn build_block_tree(flat: Vec<StoredBlockRow>) -> StorageResult<Vec<Block>> {
+    let mut children_by_parent: BTreeMap<Option<String>, Vec<StoredBlockRow>> = BTreeMap::new();
+    for row in flat {
+        children_by_parent
+            .entry(row.parent_id.clone())
+            .or_default()
+            .push(row);
+    }
+
+    build_block_tree_from_parent(&mut children_by_parent, None)
+}
+
+fn build_block_tree_from_parent(
+    children_by_parent: &mut BTreeMap<Option<String>, Vec<StoredBlockRow>>,
+    parent_id: Option<String>,
+) -> StorageResult<Vec<Block>> {
+    let rows = children_by_parent.remove(&parent_id).unwrap_or_default();
+    let mut blocks = Vec::with_capacity(rows.len());
+    for row in rows {
+        let id = Uuid::parse_str(&row.id)?;
         blocks.push(Block {
-            id: Uuid::parse_str(&row.id)?,
-            content: row.content.clone(),
+            id,
+            content: row.content,
             properties: serde_json::from_str(&row.properties_json)?,
-            children: build_block_tree(flat, Some(row.id.as_str()))?,
+            children: build_block_tree_from_parent(children_by_parent, Some(id.to_string()))?,
         });
     }
     Ok(blocks)
@@ -1830,6 +1872,7 @@ struct StoredCardRow {
     raw_content: String,
     properties_json: String,
     incomplete: bool,
+    srs: StoredSrsRow,
 }
 
 struct StoredBlockRow {
@@ -2054,6 +2097,43 @@ mod tests {
         assert_eq!(cards[0].deck, "Programming");
         assert_eq!(cards[0].topic, "TypeScript");
         assert_eq!(cards[0].srs.reps, 0);
+    }
+
+    #[test]
+    fn saves_and_loads_large_workspace_card_index() {
+        let mut pages = Vec::new();
+        for page_index in 0..60 {
+            let mut markdown = String::new();
+            markdown.push_str(&format!(
+                "# Page {page_index}\nsgd-deck:: Deck {}\n",
+                page_index % 5
+            ));
+            for card_index in 0..10 {
+                markdown.push_str(&format!(
+                    "- Question {page_index}-{card_index}? #card [[Concept {}]]\n  sgd-topic:: Topic {}\n  - Answer {page_index}-{card_index}\n",
+                    card_index % 4,
+                    card_index % 3
+                ));
+            }
+            pages.push(import_single_markdown_page(
+                &format!("Page {page_index}"),
+                &markdown,
+            ));
+        }
+        let workspace = Workspace {
+            id: Uuid::new_v4(),
+            name: "Large".to_string(),
+            pages,
+        };
+        let mut storage = StudyGraphStorage::in_memory().unwrap();
+
+        storage.save_workspace(&workspace).unwrap();
+        let loaded = storage.load_workspace(workspace.id).unwrap().unwrap();
+        let cards = storage.load_cards(workspace.id).unwrap();
+
+        assert_eq!(loaded.pages.len(), 60);
+        assert_eq!(cards.len(), 600);
+        assert!(cards.iter().all(|card| card.srs.reps == 0));
     }
 
     #[test]
