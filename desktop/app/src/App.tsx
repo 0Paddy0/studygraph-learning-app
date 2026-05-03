@@ -122,12 +122,16 @@ export function App() {
   const [reviewNodeId, setReviewNodeId] = useState<string | null>(null);
   const [reviewScopeLabel, setReviewScopeLabel] = useState("All due cards");
   const [showAnswer, setShowAnswer] = useState(false);
+  const [reviewStartedAt, setReviewStartedAt] = useState(() => Date.now());
+  const [reviewResponseTimeMs, setReviewResponseTimeMs] = useState<number | undefined>();
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("all");
   const [practiceDeckSlug, setPracticeDeckSlug] = useState<string>("");
   const [practiceNodeId, setPracticeNodeId] = useState<string>("");
   const [practiceScopeLabel, setPracticeScopeLabel] = useState("All cards");
   const [practiceIndex, setPracticeIndex] = useState(0);
   const [practiceShowAnswer, setPracticeShowAnswer] = useState(false);
+  const [practiceStartedAt, setPracticeStartedAt] = useState(() => Date.now());
+  const [practiceResponseTimeMs, setPracticeResponseTimeMs] = useState<number | undefined>();
   const [practiceRecordRatings, setPracticeRecordRatings] = useState(false);
   const [selectedNode, setSelectedNode] = useState<StudyGraphNode | null>(null);
   const [pageName, setPageName] = useState("Imported Page");
@@ -180,6 +184,16 @@ export function App() {
     void loadSettingsFromStorage();
     void loadDocsFromStorage();
   }, []);
+
+  function revealReviewAnswer() {
+    setReviewResponseTimeMs(Date.now() - reviewStartedAt);
+    setShowAnswer(true);
+  }
+
+  function revealPracticeAnswer() {
+    setPracticeResponseTimeMs(Date.now() - practiceStartedAt);
+    setPracticeShowAnswer(true);
+  }
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -382,9 +396,10 @@ export function App() {
     }
     setError(null);
     try {
-      const next = await reviewCard(card.id, rating);
+      const next = await reviewCard(card.id, rating, reviewResponseTimeMs);
       setSnapshot(next);
       setShowAnswer(false);
+      setReviewResponseTimeMs(undefined);
       setSelectedCardIndex((current) => Math.min(current, Math.max(0, dueCards.length - 2)));
     } catch (reviewError) {
       setError(reviewError instanceof Error ? reviewError.message : String(reviewError));
@@ -405,9 +420,10 @@ export function App() {
 
     setError(null);
     try {
-      const next = await reviewCard(card.id, rating);
+      const next = await reviewCard(card.id, rating, practiceResponseTimeMs);
       setSnapshot(next);
       setPracticeShowAnswer(false);
+      setPracticeResponseTimeMs(undefined);
       setPracticeIndex((current) => Math.min(current, Math.max(0, practiceQueue.length - 2)));
     } catch (reviewError) {
       setError(reviewError instanceof Error ? reviewError.message : String(reviewError));
@@ -951,6 +967,17 @@ export function App() {
   );
   const currentCard = dueCards[selectedCardIndex];
   const currentPracticeCard = practiceQueue[practiceIndex];
+
+  useEffect(() => {
+    setReviewStartedAt(Date.now());
+    setReviewResponseTimeMs(undefined);
+  }, [currentCard?.id]);
+
+  useEffect(() => {
+    setPracticeStartedAt(Date.now());
+    setPracticeResponseTimeMs(undefined);
+  }, [currentPracticeCard?.id]);
+
   const selectedDocPage = docPages.find((page) => page.id === selectedDocPageId) ?? docPages[0];
 
   return (
@@ -1156,9 +1183,10 @@ export function App() {
             total={dueCards.length}
             scopeLabel={reviewScopeLabel}
             showAnswer={showAnswer}
-            onShowAnswer={() => setShowAnswer(true)}
+            onShowAnswer={revealReviewAnswer}
             onSkip={() => {
               setShowAnswer(false);
+              setReviewResponseTimeMs(undefined);
               setSelectedCardIndex((current) => Math.min(current + 1, Math.max(0, dueCards.length - 1)));
             }}
             onRate={(rating) => void rateCurrent(rating)}
@@ -1191,11 +1219,13 @@ export function App() {
               setPracticeScopeLabel("Deck");
               setPracticeIndex(0);
               setPracticeShowAnswer(false);
+              setPracticeResponseTimeMs(undefined);
             }}
             onRecordRatingsChange={setPracticeRecordRatings}
-            onShowAnswer={() => setPracticeShowAnswer(true)}
+            onShowAnswer={revealPracticeAnswer}
             onSkip={() => {
               setPracticeShowAnswer(false);
+              setPracticeResponseTimeMs(undefined);
               setPracticeIndex((current) => Math.min(current + 1, Math.max(0, practiceQueue.length - 1)));
             }}
             onRate={(rating) => void ratePractice(rating)}

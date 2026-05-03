@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use studygraph_core::{
     build_backlinks, build_study_graph, export_page_to_logseq_markdown,
-    import_single_markdown_page, schedule_review, AppBackup, AppSettings, BacklinkReference, Block,
+    import_single_markdown_page, schedule_review_with_response_time, AppBackup, AppSettings, BacklinkReference, Block,
     DocBlockKind, DocPage, Page, Rating, ReviewEvent, SchedulerSettings, StudyCard, StudyGraphData,
     StudyGraphStorage, Workspace,
 };
@@ -652,6 +652,7 @@ fn delete_block(
 fn review_card(
     card_id: String,
     rating: String,
+    response_time_ms: Option<u32>,
     state: tauri::State<'_, AppState>,
 ) -> Result<DesktopSnapshot, String> {
     let workspace_id = ensure_workspace(&state)?;
@@ -667,12 +668,19 @@ fn review_card(
             .find(|card| card.id == card_uuid)
             .ok_or_else(|| "Card not found".to_string())?
     };
-    let next_srs = schedule_review(&card.srs, rating, now, SchedulerSettings::default());
+    let next_srs = schedule_review_with_response_time(
+        &card.srs,
+        rating,
+        response_time_ms,
+        now,
+        SchedulerSettings::default(),
+    );
     let event = ReviewEvent {
         id: Uuid::new_v4(),
         card_id: card.id,
         rating,
         reviewed_at: now,
+        response_time_ms,
         previous_srs: card.srs,
         next_srs,
     };

@@ -172,6 +172,7 @@ impl StudyGraphStorage {
                 card_id TEXT NOT NULL,
                 rating TEXT NOT NULL,
                 reviewed_at TEXT NOT NULL,
+                response_time_ms INTEGER,
                 previous_srs_json TEXT NOT NULL,
                 next_srs_json TEXT NOT NULL
             );
@@ -221,6 +222,7 @@ impl StudyGraphStorage {
             ",
         )?;
         self.ensure_doc_page_metadata_columns()?;
+        add_column_if_missing(&self.conn, "review_events", "response_time_ms", "INTEGER")?;
         Ok(())
     }
 
@@ -442,14 +444,15 @@ impl StudyGraphStorage {
         self.conn.execute(
             "
             INSERT INTO review_events
-                (id, card_id, rating, reviewed_at, previous_srs_json, next_srs_json)
-            VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                (id, card_id, rating, reviewed_at, response_time_ms, previous_srs_json, next_srs_json)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
             ",
             params![
                 event.id.to_string(),
                 event.card_id.to_string(),
                 rating_to_str(event.rating),
                 event.reviewed_at.to_rfc3339(),
+                event.response_time_ms,
                 serde_json::to_string(&event.previous_srs)?,
                 serde_json::to_string(&event.next_srs)?,
             ],
@@ -461,7 +464,7 @@ impl StudyGraphStorage {
     pub fn load_review_events(&self, card_id: Uuid) -> StorageResult<Vec<ReviewEvent>> {
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, rating, reviewed_at, previous_srs_json, next_srs_json
+            SELECT id, rating, reviewed_at, response_time_ms, previous_srs_json, next_srs_json
             FROM review_events
             WHERE card_id = ?1
             ORDER BY reviewed_at ASC
@@ -472,19 +475,21 @@ impl StudyGraphStorage {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
+                row.get::<_, Option<u32>>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })?;
 
         let mut events = Vec::new();
         for row in rows {
-            let (id, rating, reviewed_at, previous_srs_json, next_srs_json) = row?;
+            let (id, rating, reviewed_at, response_time_ms, previous_srs_json, next_srs_json) = row?;
             events.push(ReviewEvent {
                 id: Uuid::parse_str(&id)?,
                 card_id,
                 rating: rating_from_str(&rating),
                 reviewed_at: parse_datetime(&reviewed_at)?,
+                response_time_ms,
                 previous_srs: serde_json::from_str(&previous_srs_json)?,
                 next_srs: serde_json::from_str(&next_srs_json)?,
             });
@@ -1299,6 +1304,26 @@ fn normalize_doc_tags(tags: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn add_column_if_missing(
+    conn: &Connection,
+    table_name: &str,
+    column_name: &str,
+    column_sql: &str,
+) -> StorageResult<()> {
+    let mut stmt = conn.prepare(&format!("PRAGMA table_info({table_name})"))?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for row in rows {
+        if row? == column_name {
+            return Ok(());
+        }
+    }
+    conn.execute(
+        &format!("ALTER TABLE {table_name} ADD COLUMN {column_name} {column_sql}"),
+        [],
+    )?;
+    Ok(())
+}
+
 fn parse_datetime(value: &str) -> Result<DateTime<Utc>, chrono::ParseError> {
     DateTime::parse_from_rfc3339(value).map(|datetime| datetime.with_timezone(&Utc))
 }
@@ -1466,6 +1491,7 @@ mod tests {
             card_id: card.id,
             rating: Rating::Good,
             reviewed_at: now,
+            response_time_ms: None,
             previous_srs: card.srs,
             next_srs: next.clone(),
         };
@@ -1501,6 +1527,7 @@ mod tests {
             card_id: card.id,
             rating: Rating::Good,
             reviewed_at: now,
+            response_time_ms: None,
             previous_srs: card.srs,
             next_srs: next,
         };
@@ -1590,6 +1617,7 @@ mod tests {
                 card_id: card.id,
                 rating: Rating::Easy,
                 reviewed_at: now,
+                response_time_ms: None,
                 previous_srs: card.srs,
                 next_srs: next,
             })
@@ -1643,6 +1671,7 @@ mod tests {
                 card_id: card.id,
                 rating: Rating::Good,
                 reviewed_at: now,
+                response_time_ms: None,
                 previous_srs: card.srs,
                 next_srs: next,
             })

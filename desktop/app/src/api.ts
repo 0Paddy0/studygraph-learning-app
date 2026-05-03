@@ -114,10 +114,11 @@ export async function importMarkdownFolder(folderPath: string): Promise<FolderIm
   return invoke<FolderImportResult>("import_markdown_folder", { folderPath });
 }
 
-export async function reviewCard(cardId: string, rating: Rating): Promise<DesktopSnapshot> {
+export async function reviewCard(cardId: string, rating: Rating, responseTimeMs?: number): Promise<DesktopSnapshot> {
   return invoke<DesktopSnapshot>("review_card", {
     cardId,
     rating,
+    responseTimeMs,
   });
 }
 

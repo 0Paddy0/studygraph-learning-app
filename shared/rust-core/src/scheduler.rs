@@ -13,6 +13,12 @@ pub struct SchedulerSettings {
     pub again_ease_penalty: f32,
     pub easy_ease_bonus: f32,
     pub max_interval_days: u32,
+    pub fast_answer_ms: u32,
+    pub slow_answer_ms: u32,
+    pub fast_interval_bonus: f32,
+    pub slow_interval_penalty: f32,
+    pub fast_ease_bonus: f32,
+    pub slow_ease_penalty: f32,
 }
 
 impl Default for SchedulerSettings {
@@ -28,6 +34,12 @@ impl Default for SchedulerSettings {
             again_ease_penalty: 0.20,
             easy_ease_bonus: 0.15,
             max_interval_days: 3650,
+            fast_answer_ms: 5_000,
+            slow_answer_ms: 20_000,
+            fast_interval_bonus: 1.15,
+            slow_interval_penalty: 0.80,
+            fast_ease_bonus: 0.05,
+            slow_ease_penalty: 0.10,
         }
     }
 }
@@ -50,6 +62,16 @@ pub fn default_srs_state(now: DateTime<Utc>, settings: SchedulerSettings) -> Srs
 pub fn schedule_review(
     previous: &SrsState,
     rating: Rating,
+    now: DateTime<Utc>,
+    settings: SchedulerSettings,
+) -> SrsState {
+    schedule_review_with_response_time(previous, rating, None, now, settings)
+}
+
+pub fn schedule_review_with_response_time(
+    previous: &SrsState,
+    rating: Rating,
+    response_time_ms: Option<u32>,
     now: DateTime<Utc>,
     settings: SchedulerSettings,
 ) -> SrsState {
@@ -104,6 +126,8 @@ pub fn schedule_review(
         }
     }
 
+    apply_response_time_adjustment(&mut next, rating, response_time_ms, settings);
+
     next
 }
 
@@ -128,6 +152,34 @@ fn is_new_state(state: &SrsState) -> bool {
 
 fn clamp_interval(interval_days: u32, settings: SchedulerSettings) -> u32 {
     interval_days.min(settings.max_interval_days)
+}
+
+fn apply_response_time_adjustment(
+    next: &mut SrsState,
+    rating: Rating,
+    response_time_ms: Option<u32>,
+    settings: SchedulerSettings,
+) {
+    let Some(response_time_ms) = response_time_ms else {
+        return;
+    };
+    if rating == Rating::Again || next.interval_days == 0 {
+        return;
+    }
+
+    if response_time_ms <= settings.fast_answer_ms && matches!(rating, Rating::Good | Rating::Easy) {
+        next.ease += settings.fast_ease_bonus;
+        next.interval_days = clamp_interval(
+            ((next.interval_days as f32) * settings.fast_interval_bonus).round().max(1.0) as u32,
+            settings,
+        );
+    } else if response_time_ms >= settings.slow_answer_ms && matches!(rating, Rating::Hard | Rating::Good) {
+        next.ease = (next.ease - settings.slow_ease_penalty).max(settings.min_ease);
+        next.interval_days = clamp_interval(
+            ((next.interval_days as f32) * settings.slow_interval_penalty).round().max(1.0) as u32,
+            settings,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -160,5 +212,51 @@ mod tests {
         assert_eq!(next.lapses, 1);
         assert_eq!(next.interval_days, 0);
         assert_eq!(next.due_at.unwrap(), now + Duration::minutes(10));
+    }
+
+    #[test]
+    fn fast_good_answer_boosts_interval_and_ease() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let settings = SchedulerSettings::default();
+        let mut state = default_srs_state(now, settings);
+        state.state = CardState::Review;
+        state.due_at = Some(now);
+        state.interval_days = 10;
+        state.reps = 3;
+
+        let next = schedule_review_with_response_time(&state, Rating::Good, Some(4_000), now, settings);
+
+        assert!(next.interval_days > 25);
+        assert!(next.ease > state.ease);
+    }
+
+    #[test]
+    fn slow_good_answer_reduces_interval_and_ease() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let settings = SchedulerSettings::default();
+        let mut state = default_srs_state(now, settings);
+        state.state = CardState::Review;
+        state.due_at = Some(now);
+        state.interval_days = 10;
+        state.reps = 3;
+
+        let next = schedule_review_with_response_time(&state, Rating::Good, Some(25_000), now, settings);
+
+        assert!(next.interval_days < 25);
+        assert!(next.ease < state.ease);
+    }
+
+    #[test]
+    fn again_ignores_response_time() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let settings = SchedulerSettings::default();
+        let state = default_srs_state(now, settings);
+
+        let without_time = schedule_review_with_response_time(&state, Rating::Again, None, now, settings);
+        let with_time = schedule_review_with_response_time(&state, Rating::Again, Some(1_000), now, settings);
+
+        assert_eq!(with_time.interval_days, without_time.interval_days);
+        assert_eq!(with_time.due_at, without_time.due_at);
+        assert_eq!(with_time.ease, without_time.ease);
     }
 }

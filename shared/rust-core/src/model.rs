@@ -89,6 +89,8 @@ pub struct ReviewEvent {
     pub card_id: CardId,
     pub rating: Rating,
     pub reviewed_at: DateTime<Utc>,
+    #[serde(default)]
+    pub response_time_ms: Option<u32>,
     pub previous_srs: SrsState,
     pub next_srs: SrsState,
 }

@@ -120,6 +120,7 @@ export interface ReviewEvent {
   card_id: string;
   rating: Rating;
   reviewed_at: string;
+  response_time_ms?: number | null;
   previous_srs: SrsState;
   next_srs: SrsState;
 }
