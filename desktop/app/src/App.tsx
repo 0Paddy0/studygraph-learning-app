@@ -865,11 +865,12 @@ export function App() {
 
 
   function openTodoItem(item: TodoItem) {
-    if (item.scope === "topic") {
-      startPractice("graph", "", item.id, `${item.deck ?? "Deck"} / ${item.topic ?? "Topic"}`);
+    const practiceTarget = todoPracticeTarget(item, cards);
+    if (practiceTarget) {
+      startPractice("graph", "", practiceTarget.nodeId, practiceTarget.label);
       return;
     }
-    openBlock(item.pageId, item.block.id);
+    setError("No learning topic found for this To Do item.");
   }
 
   function openCardSource(card: StudyCard) {
@@ -4536,6 +4537,25 @@ function stripTodoPrefix(value: string) {
     .replace(/^(\- )?\[[ xX]\]\s+/, "")
     .replace(/^(todo|doing|done)\s+/i, "")
     .trim() || "Untitled task";
+}
+
+function todoPracticeTarget(item: TodoItem, cards: StudyCard[]) {
+  if (item.scope === "topic") {
+    return {
+      nodeId: item.id,
+      label: `${item.deck ?? "Deck"} / ${item.topic ?? "Topic"}`,
+    };
+  }
+
+  const relatedCard = cards.find((card) => card.source_page === item.pageName);
+  if (!relatedCard) {
+    return null;
+  }
+
+  return {
+    nodeId: `topic:${relatedCard.deck_slug}:${relatedCard.topic_slug}`,
+    label: `${relatedCard.deck} / ${relatedCard.topic}`,
+  };
 }
 
 function todoItemTitle(item: TodoItem) {
