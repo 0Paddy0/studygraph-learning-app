@@ -7,6 +7,8 @@ import {
   clozeAnswerMatches,
   evaluateClozeAnswers,
   filterGraphForView,
+  ratingWasManuallyOverridden,
+  recommendRating,
   summarizeTodoMetrics,
   todoLearningTarget,
 } from "../.test-dist/studyLogic.js";
@@ -88,6 +90,48 @@ test("cloze evaluation accepts umlaut variants and suggests ratings by completio
 
   const mostlyCorrect = evaluateClozeAnswers(["one", "two", "three", "four"], ["one", "two", "three", "nope"]);
   assert.equal(mostlyCorrect.suggestedRating, "good");
+});
+
+test("rating recommendations combine classic timing with weakness and history", () => {
+  const fastStable = recommendRating({ mode: "classic", card: card({ srs: { last_rating: "easy" } }), responseTimeMs: 3_500 });
+  assert.equal(fastStable.rating, "easy");
+  assert.ok(fastStable.reasonCodes.includes("classic-fast-recall"));
+  assert.ok(fastStable.reasonCodes.includes("fast-answer"));
+
+  const weakSlow = recommendRating({
+    mode: "classic",
+    card: card({ srs: { ease: 1.4, hard_count: 2, last_rating: "again", lapses: 2 } }),
+    responseTimeMs: 26_000,
+  });
+  assert.equal(weakSlow.rating, "hard");
+  assert.ok(weakSlow.reasonCodes.includes("weak-card"));
+  assert.ok(weakSlow.reasonCodes.includes("recent-again"));
+  assert.ok(weakSlow.summary.includes("Hard"));
+});
+
+test("rating recommendations combine cloze accuracy, response time, and manual override", () => {
+  const perfectWeak = recommendRating({
+    mode: "cloze",
+    card: card({ srs: { ease: 1.5, hard_count: 2, reps: 6 } }),
+    responseTimeMs: 4_000,
+    cloze: { blankCount: 4, filledCount: 4, correctCount: 4 },
+  });
+  assert.equal(perfectWeak.rating, "good");
+  assert.equal(perfectWeak.clozeAccuracy, 1);
+  assert.ok(perfectWeak.reasonCodes.includes("cloze-perfect"));
+  assert.ok(perfectWeak.reasonCodes.includes("weak-card"));
+  assert.equal(ratingWasManuallyOverridden("easy", perfectWeak), true);
+  assert.equal(ratingWasManuallyOverridden("good", perfectWeak), false);
+
+  const partial = recommendRating({
+    mode: "cloze",
+    card: card(),
+    responseTimeMs: 48_000,
+    cloze: { blankCount: 5, filledCount: 5, correctCount: 2 },
+  });
+  assert.equal(partial.rating, "hard");
+  assert.ok(partial.reasonCodes.includes("cloze-partial"));
+  assert.ok(partial.reasonCodes.includes("very-slow-answer"));
 });
 
 test("todo items infer learning targets from linked source pages and route to review", () => {

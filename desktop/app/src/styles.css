@@ -1199,6 +1199,58 @@ label {
   gap: 8px;
 }
 
+.recommended-rating {
+  box-shadow: 0 0 0 2px rgba(107, 179, 182, 0.38), 0 0 18px rgba(107, 179, 182, 0.18);
+}
+
+.rating-recommendation {
+  border: 1px solid rgba(107, 179, 182, 0.28);
+  background: rgba(107, 179, 182, 0.08);
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin-top: 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.rating-recommendation div:first-child {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: baseline;
+}
+
+.rating-recommendation strong {
+  color: #eaf8f7;
+}
+
+.rating-recommendation span,
+.rating-recommendation p {
+  color: #b9cecc;
+  margin: 0;
+}
+
+.rating-recommendation em {
+  color: #d6a72f;
+  font-style: normal;
+  font-weight: 800;
+}
+
+.reason-code-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.reason-code-row code {
+  border: 1px solid rgba(178, 211, 210, 0.16);
+  background: rgba(255, 255, 255, 0.055);
+  color: #d8e7e5;
+  border-radius: 999px;
+  padding: 3px 7px;
+  font-size: 11px;
+}
+
 .practice-controls {
   display: grid;
   grid-template-columns: minmax(160px, 0.8fr) minmax(180px, 1fr) auto;

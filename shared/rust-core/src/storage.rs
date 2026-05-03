@@ -1,7 +1,7 @@
 use crate::model::{
     AppBackup, AppSettings, Block, CardState, ClozeSessionResult, DocBlock, DocBlockKind, DocPage,
-    Page, Rating, ReviewEvent, ReviewSession, ReviewSessionItem, ReviewSessionKind, SrsState,
-    StudyCard, Workspace,
+    Page, Rating, RatingRecommendation, ReviewEvent, ReviewSession, ReviewSessionItem,
+    ReviewSessionKind, SrsState, StudyCard, Workspace,
 };
 use crate::parser::scan_cards_from_pages;
 use chrono::{DateTime, Utc};
@@ -11,7 +11,7 @@ use std::fmt;
 use std::path::Path;
 use uuid::Uuid;
 
-const CURRENT_SQLITE_SCHEMA_VERSION: u32 = 3;
+const CURRENT_SQLITE_SCHEMA_VERSION: u32 = 4;
 const CURRENT_BACKUP_SCHEMA_VERSION: u32 = 1;
 
 const STORAGE_INDEXES: &[&str] = &[
@@ -55,6 +55,11 @@ const SQLITE_MIGRATIONS: &[Migration] = &[
         version: 3,
         name: "large-workspace-indexes",
         apply: migration_large_workspace_indexes,
+    },
+    Migration {
+        version: 4,
+        name: "session-rating-recommendations",
+        apply: migration_session_rating_recommendations,
     },
 ];
 
@@ -275,6 +280,8 @@ impl StudyGraphStorage {
                 rating TEXT NOT NULL,
                 response_time_ms INTEGER,
                 cloze_result_json TEXT,
+                rating_recommendation_json TEXT,
+                rating_overridden INTEGER NOT NULL DEFAULT 0,
                 answered_at TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES review_sessions(id) ON DELETE CASCADE
@@ -785,7 +792,8 @@ impl StudyGraphStorage {
     fn load_review_session_items(&self, session_id: Uuid) -> StorageResult<Vec<ReviewSessionItem>> {
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, card_id, question, rating, response_time_ms, cloze_result_json, answered_at, position
+            SELECT id, card_id, question, rating, response_time_ms, cloze_result_json,
+                   rating_recommendation_json, rating_overridden, answered_at, position
             FROM review_session_items
             WHERE session_id = ?1
             ORDER BY position ASC, answered_at ASC
@@ -799,8 +807,10 @@ impl StudyGraphStorage {
                 rating: row.get(3)?,
                 response_time_ms: row.get(4)?,
                 cloze_result_json: row.get(5)?,
-                answered_at: row.get(6)?,
-                position: row.get::<_, i64>(7)?,
+                rating_recommendation_json: row.get(6)?,
+                rating_overridden: row.get::<_, i64>(7)?,
+                answered_at: row.get(8)?,
+                position: row.get::<_, i64>(9)?,
             })
         })?;
 
@@ -819,6 +829,12 @@ impl StudyGraphStorage {
                     .as_deref()
                     .map(serde_json::from_str::<ClozeSessionResult>)
                     .transpose()?,
+                rating_recommendation: row
+                    .rating_recommendation_json
+                    .as_deref()
+                    .map(serde_json::from_str::<RatingRecommendation>)
+                    .transpose()?,
+                rating_overridden: row.rating_overridden != 0,
                 answered_at: parse_datetime(&row.answered_at)?,
                 position: row.position.max(0) as u32,
             });
@@ -1656,8 +1672,9 @@ fn insert_review_session_item_conn(
     conn.execute(
         "
         INSERT INTO review_session_items
-            (id, session_id, card_id, question, rating, response_time_ms, cloze_result_json, answered_at, position)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            (id, session_id, card_id, question, rating, response_time_ms, cloze_result_json,
+             rating_recommendation_json, rating_overridden, answered_at, position)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
         ",
         params![
             item.id.to_string(),
@@ -1670,6 +1687,11 @@ fn insert_review_session_item_conn(
                 .as_ref()
                 .map(serde_json::to_string)
                 .transpose()?,
+            item.rating_recommendation
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
+            i64::from(item.rating_overridden),
             item.answered_at.to_rfc3339(),
             position as i64,
         ],
@@ -1747,6 +1769,22 @@ fn migration_sessions_cloze_settings_doc_metadata(conn: &Connection) -> StorageR
 
 fn migration_large_workspace_indexes(conn: &Connection) -> StorageResult<()> {
     ensure_storage_indexes(conn)
+}
+
+fn migration_session_rating_recommendations(conn: &Connection) -> StorageResult<()> {
+    add_column_if_missing(
+        conn,
+        "review_session_items",
+        "rating_recommendation_json",
+        "TEXT",
+    )?;
+    add_column_if_missing(
+        conn,
+        "review_session_items",
+        "rating_overridden",
+        "INTEGER NOT NULL DEFAULT 0",
+    )?;
+    Ok(())
 }
 
 fn ensure_doc_page_metadata_columns_conn(conn: &Connection) -> StorageResult<()> {
@@ -1917,6 +1955,8 @@ struct StoredReviewSessionItemRow {
     rating: String,
     response_time_ms: Option<u32>,
     cloze_result_json: Option<String>,
+    rating_recommendation_json: Option<String>,
+    rating_overridden: i64,
     answered_at: String,
     position: i64,
 }
@@ -2026,6 +2066,16 @@ mod tests {
             "review_session_items",
             "cloze_result_json"
         ));
+        assert!(column_exists(
+            &storage.conn,
+            "review_session_items",
+            "rating_recommendation_json"
+        ));
+        assert!(column_exists(
+            &storage.conn,
+            "review_session_items",
+            "rating_overridden"
+        ));
         assert!(index_exists(
             &storage.conn,
             "idx_cards_workspace_deck_topic"
@@ -2052,7 +2102,7 @@ mod tests {
             user_version,
             StoragePlan::CURRENT_SQLITE_SCHEMA_VERSION as i64
         );
-        assert_eq!(migration_count, 3);
+        assert_eq!(migration_count, 4);
     }
 
     #[test]
@@ -2252,6 +2302,17 @@ mod tests {
                     }],
                     suggested_rating: Rating::Good,
                 }),
+                rating_recommendation: Some(RatingRecommendation {
+                    mode: crate::model::RatingRecommendationMode::Cloze,
+                    policy: crate::model::RatingRecommendationPolicy::Balanced,
+                    rating: Rating::Good,
+                    confidence: 0.82,
+                    reason_codes: vec!["cloze-perfect".to_string(), "weak-card".to_string()],
+                    summary: "Balanced policy recommends Good".to_string(),
+                    response_time_ms: Some(8_000),
+                    cloze_accuracy: Some(1.0),
+                }),
+                rating_overridden: true,
                 answered_at,
                 position: 99,
             }],
@@ -2277,6 +2338,11 @@ mod tests {
         assert_eq!(cloze_result.blanks[0].input, "langauge");
         assert!(cloze_result.blanks[0].correct);
         assert_eq!(cloze_result.suggested_rating, Rating::Good);
+        let recommendation = loaded.items[0].rating_recommendation.as_ref().unwrap();
+        assert_eq!(recommendation.rating, Rating::Good);
+        assert_eq!(recommendation.reason_codes[0], "cloze-perfect");
+        assert_eq!(recommendation.cloze_accuracy, Some(1.0));
+        assert!(loaded.items[0].rating_overridden);
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, session.id);
     }
@@ -2384,6 +2450,8 @@ mod tests {
                         }],
                         suggested_rating: Rating::Hard,
                     }),
+                    rating_recommendation: None,
+                    rating_overridden: false,
                     answered_at: now,
                     position: 0,
                 }],
@@ -2475,6 +2543,8 @@ mod tests {
                         }],
                         suggested_rating: Rating::Easy,
                     }),
+                    rating_recommendation: None,
+                    rating_overridden: false,
                     answered_at: now,
                     position: 0,
                 }],

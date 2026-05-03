@@ -50,6 +50,35 @@ pub enum Rating {
     Easy,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RatingRecommendationMode {
+    Classic,
+    Cloze,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum RatingRecommendationPolicy {
+    Balanced,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct RatingRecommendation {
+    pub mode: RatingRecommendationMode,
+    pub policy: RatingRecommendationPolicy,
+    pub rating: Rating,
+    pub confidence: f32,
+    #[serde(default)]
+    pub reason_codes: Vec<String>,
+    pub summary: String,
+    #[serde(default)]
+    pub response_time_ms: Option<u32>,
+    #[serde(default)]
+    pub cloze_accuracy: Option<f32>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SrsState {
     pub state: CardState,
@@ -127,6 +156,10 @@ pub struct ReviewSessionItem {
     pub response_time_ms: Option<u32>,
     #[serde(default)]
     pub cloze_result: Option<ClozeSessionResult>,
+    #[serde(default)]
+    pub rating_recommendation: Option<RatingRecommendation>,
+    #[serde(default)]
+    pub rating_overridden: bool,
     pub answered_at: DateTime<Utc>,
     pub position: u32,
 }

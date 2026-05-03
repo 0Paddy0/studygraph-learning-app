@@ -1,4 +1,40 @@
 export type Rating = "again" | "hard" | "good" | "easy";
+export type RatingRecommendationReasonCode =
+  | "cloze-incomplete"
+  | "cloze-perfect"
+  | "cloze-mostly-correct"
+  | "cloze-partial"
+  | "cloze-many-misses"
+  | "cloze-no-blanks"
+  | "classic-fast-recall"
+  | "classic-steady-recall"
+  | "classic-slow-recall"
+  | "classic-no-timing"
+  | "weak-card"
+  | "recent-again"
+  | "repeated-hard"
+  | "lapses"
+  | "low-ease"
+  | "fast-answer"
+  | "slow-answer"
+  | "very-slow-answer"
+  | "history-new"
+  | "history-stable"
+  | "history-easy-last";
+export type RatingRecommendationPolicy = "balanced";
+export type RatingRecommendationMode = "classic" | "cloze";
+
+export interface RatingRecommendation {
+  mode: RatingRecommendationMode;
+  policy: RatingRecommendationPolicy;
+  rating: Rating;
+  confidence: number;
+  reasonCodes: RatingRecommendationReasonCode[];
+  summary: string;
+  responseTimeMs?: number | null;
+  clozeAccuracy?: number | null;
+}
+
 export type GeneratorLanguage = "auto" | "de" | "en";
 export type GeneratorDifficulty = "easy" | "medium" | "hard";
 export type GeneratorStyle = "basic" | "cloze" | "mixed";
@@ -210,6 +246,8 @@ export interface ReviewSessionItem {
   rating: Rating;
   responseTimeMs?: number | null;
   clozeResult?: ClozeSessionResult | null;
+  ratingRecommendation?: RatingRecommendation | null;
+  ratingOverridden?: boolean;
   answeredAt: string;
   position: number;
 }

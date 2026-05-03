@@ -8,6 +8,9 @@ import type {
   DocBlockKind,
   Page,
   Rating,
+  RatingRecommendation,
+  RatingRecommendationMode,
+  RatingRecommendationReasonCode,
   StudyCard,
   StudyGraphEdge,
   StudyGraphNode,
@@ -109,6 +112,187 @@ export function clozeEvaluationToResult(blanks: string[], answers: string[], sug
 
 export function ratingLabel(rating: Rating) {
   return rating === "again" ? "Again" : rating === "hard" ? "Hard" : rating === "easy" ? "Easy" : "Good";
+}
+
+export interface RatingRecommendationInput {
+  mode: RatingRecommendationMode;
+  card: StudyCard;
+  responseTimeMs?: number | null;
+  cloze?: {
+    blankCount: number;
+    filledCount: number;
+    correctCount: number;
+  } | null;
+}
+
+const ratingOrder: Rating[] = ["again", "hard", "good", "easy"];
+const fastRecommendationMs = 5_000;
+const slowRecommendationMs = 20_000;
+const verySlowRecommendationMs = 45_000;
+
+export function recommendRating(input: RatingRecommendationInput): RatingRecommendation {
+  const reasons: RatingRecommendationReasonCode[] = [];
+  const responseTimeMs = typeof input.responseTimeMs === "number" ? input.responseTimeMs : undefined;
+  const weak = isWeak(input.card);
+  let rating: Rating = "good";
+  let clozeAccuracy: number | undefined;
+
+  if (input.mode === "cloze" && input.cloze) {
+    const { blankCount, filledCount, correctCount } = input.cloze;
+    clozeAccuracy = blankCount > 0 ? correctCount / blankCount : 1;
+    if (blankCount === 0) {
+      rating = "good";
+      reasons.push("cloze-no-blanks");
+    } else if (filledCount < blankCount) {
+      rating = "again";
+      reasons.push("cloze-incomplete");
+    } else if (clozeAccuracy >= 1) {
+      rating = "easy";
+      reasons.push("cloze-perfect");
+    } else if (clozeAccuracy >= 0.75) {
+      rating = "good";
+      reasons.push("cloze-mostly-correct");
+    } else if (clozeAccuracy >= 0.4) {
+      rating = "hard";
+      reasons.push("cloze-partial");
+    } else {
+      rating = "again";
+      reasons.push("cloze-many-misses");
+    }
+  } else {
+    if (responseTimeMs === undefined) {
+      rating = "good";
+      reasons.push("classic-no-timing");
+    } else if (responseTimeMs <= fastRecommendationMs) {
+      rating = "easy";
+      reasons.push("classic-fast-recall");
+    } else if (responseTimeMs >= slowRecommendationMs) {
+      rating = "hard";
+      reasons.push("classic-slow-recall");
+    } else {
+      rating = "good";
+      reasons.push("classic-steady-recall");
+    }
+  }
+
+  if (responseTimeMs !== undefined) {
+    if (responseTimeMs <= fastRecommendationMs) {
+      reasons.push("fast-answer");
+      if (!weak && rating === "good") rating = "easy";
+    } else if (responseTimeMs >= verySlowRecommendationMs) {
+      reasons.push("very-slow-answer");
+      if (rating === "easy") rating = "good";
+      if (rating === "good") rating = "hard";
+    } else if (responseTimeMs >= slowRecommendationMs) {
+      reasons.push("slow-answer");
+      if (rating === "easy") rating = "good";
+      else if (rating === "good") rating = "hard";
+    }
+  }
+
+  if (input.card.srs.reps === 0) {
+    reasons.push("history-new");
+  } else if (!weak && input.card.srs.reps >= 3 && input.card.srs.last_rating === "easy") {
+    reasons.push("history-easy-last");
+    if (rating === "good" && responseTimeMs !== undefined && responseTimeMs <= slowRecommendationMs) rating = "easy";
+  } else if (!weak && input.card.srs.reps >= 3) {
+    reasons.push("history-stable");
+  }
+
+  if (input.card.srs.last_rating === "again") {
+    reasons.push("recent-again");
+    rating = minRating(rating, responseTimeMs !== undefined && responseTimeMs <= fastRecommendationMs ? "good" : "hard");
+  }
+  if (input.card.srs.hard_count >= 2) {
+    reasons.push("repeated-hard");
+    rating = minRating(rating, responseTimeMs !== undefined && responseTimeMs <= fastRecommendationMs ? "good" : "hard");
+  }
+  if (input.card.srs.lapses >= 2) {
+    reasons.push("lapses");
+    rating = minRating(rating, "good");
+    if (responseTimeMs === undefined || responseTimeMs >= slowRecommendationMs) rating = minRating(rating, "hard");
+  }
+  if (input.card.srs.ease <= 1.6) {
+    reasons.push("low-ease");
+    rating = minRating(rating, "good");
+  }
+  if (weak) {
+    reasons.push("weak-card");
+    rating = minRating(rating, "good");
+  }
+
+  const reasonCodes = uniqueReasonCodes(reasons);
+  return {
+    mode: input.mode,
+    policy: "balanced",
+    rating,
+    confidence: recommendationConfidence(input.mode, rating, reasonCodes, responseTimeMs, clozeAccuracy),
+    reasonCodes,
+    summary: recommendationSummary(rating, reasonCodes),
+    responseTimeMs: responseTimeMs ?? null,
+    clozeAccuracy: clozeAccuracy ?? null,
+  };
+}
+
+export function recommendationReasonLabel(code: RatingRecommendationReasonCode) {
+  const labels: Record<RatingRecommendationReasonCode, string> = {
+    "cloze-incomplete": "some blanks are still empty",
+    "cloze-perfect": "all cloze blanks are correct",
+    "cloze-mostly-correct": "most cloze blanks are correct",
+    "cloze-partial": "partial cloze recall",
+    "cloze-many-misses": "many cloze misses",
+    "cloze-no-blanks": "no cloze blanks available",
+    "classic-fast-recall": "fast Classic recall",
+    "classic-steady-recall": "steady Classic recall",
+    "classic-slow-recall": "slow Classic recall",
+    "classic-no-timing": "no timing signal",
+    "weak-card": "card is weak",
+    "recent-again": "last rating was Again",
+    "repeated-hard": "repeated Hard history",
+    "lapses": "multiple lapses",
+    "low-ease": "low ease",
+    "fast-answer": "fast answer time",
+    "slow-answer": "slow answer time",
+    "very-slow-answer": "very slow answer time",
+    "history-new": "new card",
+    "history-stable": "stable review history",
+    "history-easy-last": "last rating was Easy",
+  };
+  return labels[code];
+}
+
+export function ratingWasManuallyOverridden(rating: Rating, recommendation?: RatingRecommendation | null) {
+  return Boolean(recommendation && rating !== recommendation.rating);
+}
+
+function recommendationSummary(rating: Rating, reasonCodes: RatingRecommendationReasonCode[]) {
+  const primaryReasons = reasonCodes.slice(0, 3).map(recommendationReasonLabel);
+  return `Balanced policy recommends ${ratingLabel(rating)}${primaryReasons.length > 0 ? `: ${primaryReasons.join(", ")}.` : "."}`;
+}
+
+function recommendationConfidence(
+  mode: RatingRecommendationMode,
+  rating: Rating,
+  reasonCodes: RatingRecommendationReasonCode[],
+  responseTimeMs?: number,
+  clozeAccuracy?: number,
+) {
+  let confidence = mode === "cloze" ? 0.66 : 0.52;
+  if (mode === "cloze" && clozeAccuracy !== undefined) {
+    confidence += Math.abs(clozeAccuracy - 0.5) * 0.26;
+  }
+  if (responseTimeMs !== undefined) confidence += 0.08;
+  if (reasonCodes.some((code) => code === "weak-card" || code === "recent-again" || code === "repeated-hard")) confidence += 0.06;
+  if (rating === "again" || rating === "easy") confidence += 0.03;
+  return Math.min(0.95, Math.max(0.35, Number(confidence.toFixed(2))));
+}
+
+function minRating(left: Rating, right: Rating): Rating {
+  return ratingOrder[Math.min(ratingOrder.indexOf(left), ratingOrder.indexOf(right))] ?? "good";
+}
+
+function uniqueReasonCodes(reasons: RatingRecommendationReasonCode[]) {
+  return reasons.filter((reason, index) => reasons.indexOf(reason) === index);
 }
 
 export function buildClozePrompt(card: StudyCard) {

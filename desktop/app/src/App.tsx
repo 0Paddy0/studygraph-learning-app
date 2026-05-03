@@ -89,6 +89,9 @@ import {
   nodeRadius,
   pageNameFromFilePath,
   ratingLabel,
+  ratingWasManuallyOverridden,
+  recommendRating,
+  recommendationReasonLabel,
   shorten,
   singleLine,
   stripPageLinks,
@@ -118,6 +121,7 @@ import type {
   GeneratedCard,
   Page,
   Rating,
+  RatingRecommendation,
   ReviewSession,
   ReviewSessionKind,
   StudyCard,
@@ -189,6 +193,8 @@ interface SessionAnswerStat {
   rating: Rating;
   responseTimeMs?: number;
   clozeResult?: ClozeSessionResult;
+  ratingRecommendation?: RatingRecommendation;
+  ratingOverridden?: boolean;
   answeredAt: string;
 }
 
@@ -547,7 +553,7 @@ export function App() {
     }
   }
 
-  async function rateCurrent(rating: Rating, clozeResult?: ClozeSessionResult) {
+  async function rateCurrent(rating: Rating, clozeResult?: ClozeSessionResult, recommendation?: RatingRecommendation) {
     const card = dueCards[selectedCardIndex];
     if (!card) {
       return;
@@ -562,6 +568,8 @@ export function App() {
         rating,
         responseTimeMs: reviewResponseTimeMs,
         clozeResult,
+        ratingRecommendation: recommendation,
+        ratingOverridden: ratingWasManuallyOverridden(rating, recommendation),
         answeredAt: new Date().toISOString(),
       }]);
       setSnapshot(next);
@@ -573,7 +581,7 @@ export function App() {
     }
   }
 
-  async function ratePractice(rating: Rating, clozeResult?: ClozeSessionResult) {
+  async function ratePractice(rating: Rating, clozeResult?: ClozeSessionResult, recommendation?: RatingRecommendation) {
     const card = practiceQueue[practiceIndex];
     if (!card) {
       return;
@@ -596,6 +604,8 @@ export function App() {
         rating,
         responseTimeMs: practiceResponseTimeMs,
         clozeResult,
+        ratingRecommendation: recommendation,
+        ratingOverridden: ratingWasManuallyOverridden(rating, recommendation),
         answeredAt: new Date().toISOString(),
       }]);
       setSnapshot(next);
@@ -1488,7 +1498,7 @@ export function App() {
               setReviewResponseTimeMs(undefined);
               setSelectedCardIndex((current) => Math.min(current + 1, Math.max(0, dueCards.length - 1)));
             }}
-            onRate={(rating, clozeResult) => void rateCurrent(rating, clozeResult)}
+            onRate={(rating, clozeResult, recommendation) => void rateCurrent(rating, clozeResult, recommendation)}
             onOpenCard={openCardSource}
           />
         )}
@@ -1535,7 +1545,7 @@ export function App() {
               setPracticeResponseTimeMs(undefined);
               setPracticeIndex((current) => Math.min(current + 1, practiceQueue.length));
             }}
-            onRate={(rating, clozeResult) => void ratePractice(rating, clozeResult)}
+            onRate={(rating, clozeResult, recommendation) => void ratePractice(rating, clozeResult, recommendation)}
             onOpenCard={openCardSource}
           />
         )}
@@ -2919,12 +2929,16 @@ function StudyModeToggle({ mode, onChange }: { mode: StudyMode; onChange: (mode:
 
 function ClozeAnswer({
   card,
+  responseTimeMs,
   onRate,
   onResultChange,
+  onRecommendationChange,
 }: {
   card: StudyCard;
-  onRate?: (rating: Rating, clozeResult: ClozeSessionResult) => void;
+  responseTimeMs?: number;
+  onRate?: (rating: Rating, clozeResult: ClozeSessionResult, recommendation: RatingRecommendation) => void;
   onResultChange?: (clozeResult: ClozeSessionResult) => void;
+  onRecommendationChange?: (recommendation: RatingRecommendation) => void;
 }) {
   const clozeResponse = useMemo(() => runLocalAiClozeGeneration({ card }), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
   const cloze = clozeResponse.cloze;
@@ -2937,14 +2951,28 @@ function ClozeAnswer({
   }, [cloze.text]);
 
   const evaluation = evaluateClozeAnswers(cloze.blanks, answers);
+  const recommendation = useMemo(
+    () => recommendRating({
+      mode: "cloze",
+      card,
+      responseTimeMs,
+      cloze: {
+        blankCount: cloze.blanks.length,
+        filledCount: evaluation.filledCount,
+        correctCount: evaluation.correctCount,
+      },
+    }),
+    [card, responseTimeMs, cloze.blanks.length, evaluation.filledCount, evaluation.correctCount],
+  );
   const sessionResult = useMemo(
-    () => clozeEvaluationToResult(cloze.blanks, answers, evaluation.suggestedRating),
-    [answers, cloze.blanks, evaluation.suggestedRating],
+    () => clozeEvaluationToResult(cloze.blanks, answers, recommendation.rating),
+    [answers, cloze.blanks, recommendation.rating],
   );
 
   useEffect(() => {
     onResultChange?.(sessionResult);
-  }, [onResultChange, sessionResult]);
+    onRecommendationChange?.(recommendation);
+  }, [onResultChange, onRecommendationChange, sessionResult, recommendation]);
 
   function focusBlank(blankIndex: number) {
     if (blankIndex < 0) return;
@@ -2960,7 +2988,7 @@ function ClozeAnswer({
 
   function applySuggestedRating() {
     if (onRate && evaluation.filledCount === cloze.blanks.length) {
-      onRate(evaluation.suggestedRating, sessionResult);
+      onRate(recommendation.rating, sessionResult, recommendation);
     }
   }
 
@@ -3019,7 +3047,7 @@ function ClozeAnswer({
       {cloze.blanks.length === 0 && <p className="empty-inline">No strong cloze blanks could be generated for this answer. Use Classic Q/A for this card.</p>}
       <div className="cloze-evaluation">
         <strong>{evaluation.correctCount}/{cloze.blanks.length} correct</strong>
-        <span>Suggested rating: {ratingLabel(evaluation.suggestedRating)}</span>
+        <RecommendationPanel recommendation={recommendation} finalRating={recommendation.rating} />
         <small>{evaluation.message}</small>
         {onRate && evaluation.filledCount === cloze.blanks.length && (
           <button onClick={applySuggestedRating}>Apply suggested rating</button>
@@ -3037,6 +3065,50 @@ function ClozeAnswer({
         <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
       </details>
     </article>
+  );
+}
+
+function RecommendationPanel({
+  recommendation,
+  finalRating,
+}: {
+  recommendation: RatingRecommendation;
+  finalRating?: Rating;
+}) {
+  const overridden = finalRating !== undefined && finalRating !== recommendation.rating;
+  return (
+    <aside className="rating-recommendation" aria-label="Rating recommendation">
+      <div>
+        <strong>Auto rating · {recommendation.policy}</strong>
+        <span>Recommend {ratingLabel(recommendation.rating)} · {Math.round(recommendation.confidence * 100)}% confidence</span>
+        {overridden && <em>Manual override to {ratingLabel(finalRating)}</em>}
+      </div>
+      <p>{recommendation.summary} Enter applies the recommendation; rating buttons are manual overrides.</p>
+      <div className="reason-code-row" aria-label="Recommendation reason codes">
+        {recommendation.reasonCodes.map((code) => (
+          <code key={code} title={recommendationReasonLabel(code)}>{code}</code>
+        ))}
+      </div>
+    </aside>
+  );
+}
+
+function RatingButton({
+  rating,
+  activeRecommendation,
+  onClick,
+  className,
+}: {
+  rating: Rating;
+  activeRecommendation?: RatingRecommendation;
+  onClick: (rating: Rating) => void;
+  className: string;
+}) {
+  const recommended = activeRecommendation?.rating === rating;
+  return (
+    <button className={recommended ? `${className} recommended-rating` : className} onClick={() => onClick(rating)}>
+      {ratingLabel(rating)}{recommended ? " · recommended" : ""}
+    </button>
   );
 }
 
@@ -3083,6 +3155,7 @@ function SessionStatsPanel({
     (sum, result) => sum + result.blanks.filter((blank) => blank.correct).length,
     0,
   );
+  const overrideCount = stats.filter((stat) => stat.ratingOverridden).length;
 
   if (answered === 0 && currentResponseTimeMs === undefined) {
     return null;
@@ -3095,6 +3168,7 @@ function SessionStatsPanel({
       {averageMs !== undefined && <span>Ø answer time: {formatDurationMs(averageMs)}</span>}
       <span>Again {counts.again} · Hard {counts.hard} · Good {counts.good} · Easy {counts.easy}</span>
       {clozeBlankCount > 0 && <span>Cloze: {clozeCorrectCount}/{clozeBlankCount} blanks correct</span>}
+      {overrideCount > 0 && <span>Manual overrides: {overrideCount}</span>}
       {slowest.length > 0 && (
         <span>Slowest: {slowest.map((stat) => `${shorten(stat.question, 28)} (${formatDurationMs(stat.responseTimeMs ?? 0)})`).join(" · ")}</span>
       )}
@@ -3173,16 +3247,26 @@ function ReviewView({
   onOpenEditDesk: () => void;
   onShowAnswer: () => void;
   onSkip: () => void;
-  onRate: (rating: Rating, clozeResult?: ClozeSessionResult) => void;
+  onRate: (rating: Rating, clozeResult?: ClozeSessionResult, recommendation?: RatingRecommendation) => void;
   onOpenCard: (card: StudyCard) => void;
 }) {
   const reviewRef = useRef<HTMLElement | null>(null);
   const [latestClozeResult, setLatestClozeResult] = useState<ClozeSessionResult | undefined>();
+  const [latestClozeRecommendation, setLatestClozeRecommendation] = useState<RatingRecommendation | undefined>();
   const progress = total > 0 ? Math.min(100, Math.round(((index + 1) / total) * 100)) : 0;
+  const classicRecommendation = useMemo(
+    () => card && showAnswer && studyMode === "classic"
+      ? recommendRating({ mode: "classic", card, responseTimeMs })
+      : undefined,
+    [card, showAnswer, studyMode, responseTimeMs],
+  );
+  const activeRecommendation = studyMode === "cloze" ? latestClozeRecommendation : classicRecommendation;
   const ratingClozeResult = studyMode === "cloze" ? latestClozeResult : undefined;
+  const applyRating = (rating: Rating) => onRate(rating, ratingClozeResult, activeRecommendation);
 
   useEffect(() => {
     setLatestClozeResult(undefined);
+    setLatestClozeRecommendation(undefined);
   }, [card?.id, showAnswer, studyMode]);
 
   useEffect(() => {
@@ -3246,14 +3330,14 @@ function ReviewView({
         if (showAnswer) {
           if (event.key === "Enter") {
             event.preventDefault();
-            onRate(studyMode === "cloze" ? (latestClozeResult?.suggestedRating ?? "good") : "good", ratingClozeResult);
+            applyRating(activeRecommendation?.rating ?? (studyMode === "cloze" ? (latestClozeResult?.suggestedRating ?? "good") : "good"));
             return;
           }
           const ratingByKey: Record<string, Rating> = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
           const rating = ratingByKey[event.key];
           if (rating) {
             event.preventDefault();
-            onRate(rating, ratingClozeResult);
+            applyRating(rating);
           }
         }
       }}
@@ -3275,11 +3359,18 @@ function ReviewView({
       </article>
       {showAnswer && (
         studyMode === "cloze" ? (
-          <ClozeAnswer card={card} onRate={onRate} onResultChange={setLatestClozeResult} />
+          <ClozeAnswer
+            card={card}
+            responseTimeMs={responseTimeMs}
+            onRate={onRate}
+            onResultChange={setLatestClozeResult}
+            onRecommendationChange={setLatestClozeRecommendation}
+          />
         ) : (
           <article className="answer-card">
             <h3>Answer</h3>
             <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
+            {classicRecommendation && <RecommendationPanel recommendation={classicRecommendation} finalRating={classicRecommendation.rating} />}
           </article>
         )
       )}
@@ -3292,10 +3383,10 @@ function ReviewView({
           </>
         ) : (
           <>
-            <button className="danger" onClick={() => onRate("again", ratingClozeResult)}>Again</button>
-            <button className="warning" onClick={() => onRate("hard", ratingClozeResult)}>Hard</button>
-            <button className="primary" onClick={() => onRate("good", ratingClozeResult)}>Good</button>
-            <button className="success" onClick={() => onRate("easy", ratingClozeResult)}>Easy</button>
+            <RatingButton rating="again" activeRecommendation={activeRecommendation} onClick={applyRating} className="danger" />
+            <RatingButton rating="hard" activeRecommendation={activeRecommendation} onClick={applyRating} className="warning" />
+            <RatingButton rating="good" activeRecommendation={activeRecommendation} onClick={applyRating} className="primary" />
+            <RatingButton rating="easy" activeRecommendation={activeRecommendation} onClick={applyRating} className="success" />
             <button onClick={() => onOpenCard(card)}>Edit Card</button>
           </>
         )}
@@ -3354,12 +3445,21 @@ function FreePracticeView({
   onRecordRatingsChange: (value: boolean) => void;
   onShowAnswer: () => void;
   onSkip: () => void;
-  onRate: (rating: Rating, clozeResult?: ClozeSessionResult) => void;
+  onRate: (rating: Rating, clozeResult?: ClozeSessionResult, recommendation?: RatingRecommendation) => void;
   onOpenCard: (card: StudyCard) => void;
 }) {
   const practiceRef = useRef<HTMLElement | null>(null);
   const [latestClozeResult, setLatestClozeResult] = useState<ClozeSessionResult | undefined>();
+  const [latestClozeRecommendation, setLatestClozeRecommendation] = useState<RatingRecommendation | undefined>();
+  const classicRecommendation = useMemo(
+    () => card && showAnswer && studyMode === "classic"
+      ? recommendRating({ mode: "classic", card, responseTimeMs })
+      : undefined,
+    [card, showAnswer, studyMode, responseTimeMs],
+  );
+  const activeRecommendation = studyMode === "cloze" ? latestClozeRecommendation : classicRecommendation;
   const ratingClozeResult = studyMode === "cloze" ? latestClozeResult : undefined;
+  const applyRating = (rating: Rating) => onRate(rating, ratingClozeResult, activeRecommendation);
   const selectedDeckLabel =
     mode === "graph"
       ? `Graph: ${graphNodeLabel || "selected node"}`
@@ -3370,6 +3470,7 @@ function FreePracticeView({
 
   useEffect(() => {
     setLatestClozeResult(undefined);
+    setLatestClozeRecommendation(undefined);
   }, [card?.id, showAnswer, studyMode]);
 
   useEffect(() => {
@@ -3402,14 +3503,14 @@ function FreePracticeView({
         if (showAnswer) {
           if (event.key === "Enter") {
             event.preventDefault();
-            onRate(studyMode === "cloze" ? (latestClozeResult?.suggestedRating ?? "good") : "good", ratingClozeResult);
+            applyRating(activeRecommendation?.rating ?? (studyMode === "cloze" ? (latestClozeResult?.suggestedRating ?? "good") : "good"));
             return;
           }
           const ratingByKey: Record<string, Rating> = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
           const rating = ratingByKey[event.key];
           if (rating) {
             event.preventDefault();
-            onRate(rating, ratingClozeResult);
+            applyRating(rating);
           }
         }
       }}
@@ -3496,11 +3597,18 @@ function FreePracticeView({
           </article>
           {showAnswer && (
             studyMode === "cloze" ? (
-              <ClozeAnswer card={card} onRate={onRate} onResultChange={setLatestClozeResult} />
+              <ClozeAnswer
+                card={card}
+                responseTimeMs={responseTimeMs}
+                onRate={onRate}
+                onResultChange={setLatestClozeResult}
+                onRecommendationChange={setLatestClozeRecommendation}
+              />
             ) : (
               <article className="answer-card">
                 <h3>Answer</h3>
                 <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
+                {classicRecommendation && <RecommendationPanel recommendation={classicRecommendation} finalRating={classicRecommendation.rating} />}
               </article>
             )
           )}
@@ -3513,10 +3621,10 @@ function FreePracticeView({
               </>
             ) : (
               <>
-                <button className="danger" onClick={() => onRate("again", ratingClozeResult)}>Again</button>
-                <button className="warning" onClick={() => onRate("hard", ratingClozeResult)}>Hard</button>
-                <button className="primary" onClick={() => onRate("good", ratingClozeResult)}>Good</button>
-                <button className="success" onClick={() => onRate("easy", ratingClozeResult)}>Easy</button>
+                <RatingButton rating="again" activeRecommendation={activeRecommendation} onClick={applyRating} className="danger" />
+                <RatingButton rating="hard" activeRecommendation={activeRecommendation} onClick={applyRating} className="warning" />
+                <RatingButton rating="good" activeRecommendation={activeRecommendation} onClick={applyRating} className="primary" />
+                <RatingButton rating="easy" activeRecommendation={activeRecommendation} onClick={applyRating} className="success" />
                 <button onClick={() => onOpenCard(card)}>Edit Card</button>
                 <button onClick={onSkip}>Skip</button>
               </>
@@ -4573,6 +4681,8 @@ function buildReviewSession(
       rating: stat.rating,
       responseTimeMs: stat.responseTimeMs,
       clozeResult: stat.clozeResult,
+      ratingRecommendation: stat.ratingRecommendation,
+      ratingOverridden: stat.ratingOverridden,
       answeredAt: stat.answeredAt,
       position,
     })),
