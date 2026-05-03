@@ -1677,3 +1677,27 @@ label {
   border-color: #78c679;
   background: rgba(120, 198, 121, 0.12);
 }
+
+.cloze-text input.incorrect {
+  border-color: #d96c6c;
+  background: rgba(217, 108, 108, 0.12);
+}
+
+.cloze-evaluation,
+.cloze-corrections {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+  color: #8eb0af;
+}
+
+.cloze-evaluation strong,
+.cloze-evaluation span,
+.cloze-evaluation small,
+.cloze-corrections span {
+  border: 1px solid rgba(142, 176, 175, 0.22);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: rgba(107, 179, 182, 0.08);
+}

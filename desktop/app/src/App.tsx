@@ -2578,6 +2578,8 @@ function ClozeAnswer({ card }: { card: StudyCard }) {
     setAnswers(cloze.blanks.map(() => ""));
   }, [cloze.text]);
 
+  const evaluation = evaluateClozeAnswers(cloze.blanks, answers);
+
   return (
     <article className="answer-card cloze-card">
       <h3>AI Cloze Answer</h3>
@@ -2593,11 +2595,23 @@ function ClozeAnswer({ card }: { card: StudyCard }) {
               value={answers[part.blankIndex] ?? ""}
               placeholder="█"
               onChange={(event) => setAnswers((current) => current.map((value, answerIndex) => answerIndex === part.blankIndex ? event.target.value : value))}
-              className={normalizeAnswer(answers[part.blankIndex] ?? "") === normalizeAnswer(cloze.blanks[part.blankIndex]) ? "correct" : ""}
+              className={evaluation.results[part.blankIndex]?.correct ? "correct" : evaluation.results[part.blankIndex]?.filled ? "incorrect" : ""}
             />
           )
         ))}
       </div>
+      <div className="cloze-evaluation">
+        <strong>{evaluation.correctCount}/{cloze.blanks.length} correct</strong>
+        <span>Suggested rating: {ratingLabel(evaluation.suggestedRating)}</span>
+        <small>{evaluation.message}</small>
+      </div>
+      {evaluation.results.some((result) => result.filled && !result.correct) && (
+        <div className="cloze-corrections">
+          {evaluation.results.map((result, index) => (
+            result.filled && !result.correct ? <span key={index}>#{index + 1}: {cloze.blanks[index]}</span> : null
+          ))}
+        </div>
+      )}
       <details>
         <summary>Show original answer</summary>
         <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
@@ -3833,6 +3847,42 @@ function filterDocPages(pages: DocPage[], query: string) {
     ].join(" ").toLowerCase();
     return haystack.includes(needle);
   });
+}
+
+function evaluateClozeAnswers(blanks: string[], answers: string[]) {
+  const results = blanks.map((blank, index) => {
+    const answer = answers[index] ?? "";
+    return {
+      filled: answer.trim().length > 0,
+      correct: normalizeAnswer(answer) === normalizeAnswer(blank),
+    };
+  });
+  const filledCount = results.filter((result) => result.filled).length;
+  const correctCount = results.filter((result) => result.correct).length;
+  const ratio = blanks.length === 0 ? 1 : correctCount / blanks.length;
+  const suggestedRating: Rating = filledCount < blanks.length
+    ? "again"
+    : ratio >= 1
+      ? "easy"
+      : ratio >= 0.75
+        ? "good"
+        : ratio >= 0.4
+          ? "hard"
+          : "again";
+  const message = filledCount < blanks.length
+    ? "Complete all blanks before rating."
+    : ratio >= 1
+      ? "All blanks correct. This can be rated Easy."
+      : ratio >= 0.75
+        ? "Mostly correct. Good is appropriate."
+        : ratio >= 0.4
+          ? "Partial recall. Hard is appropriate."
+          : "Too many misses. Again is appropriate.";
+  return { results, filledCount, correctCount, suggestedRating, message };
+}
+
+function ratingLabel(rating: Rating) {
+  return rating === "again" ? "Again" : rating === "hard" ? "Hard" : rating === "easy" ? "Easy" : "Good";
 }
 
 function buildClozePrompt(card: StudyCard) {
