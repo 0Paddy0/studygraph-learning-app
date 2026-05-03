@@ -497,7 +497,8 @@ export function App() {
 
     if (!practiceRecordRatings) {
       setPracticeShowAnswer(false);
-      setPracticeIndex((current) => Math.min(current + 1, Math.max(0, practiceQueue.length - 1)));
+      setPracticeResponseTimeMs(undefined);
+      setPracticeIndex((current) => Math.min(current + 1, practiceQueue.length));
       return;
     }
 
@@ -1322,6 +1323,7 @@ export function App() {
         {screen === "dashboard" && (
           <DashboardView
             decks={decks}
+            onGenerateCards={() => setScreen("generate")}
             onReviewDeck={(deckSlug) => {
               const deck = decks.find((candidate) => candidate.deck_slug === deckSlug);
               startDueReview(`deck:${deckSlug}`, deck?.deck ?? "Deck");
@@ -1353,6 +1355,10 @@ export function App() {
             responseTimeMs={reviewResponseTimeMs}
             sessionStats={reviewSessionStats}
             recentSummaries={sessionSummaries}
+            allCardCount={cards.length}
+            onStartPractice={() => startPractice("all")}
+            onGenerateCards={() => setScreen("generate")}
+            onOpenEditDesk={() => setScreen("notes")}
             onShowAnswer={revealReviewAnswer}
             onSkip={() => {
               setShowAnswer(false);
@@ -1379,6 +1385,9 @@ export function App() {
             responseTimeMs={practiceResponseTimeMs}
             sessionStats={practiceSessionStats}
             recentSummaries={sessionSummaries}
+            allCardCount={cards.length}
+            onGenerateCards={() => setScreen("generate")}
+            onOpenEditDesk={() => setScreen("notes")}
             recordRatings={practiceRecordRatings}
             onModeChange={(mode) => {
               setPracticeMode(mode);
@@ -1401,7 +1410,7 @@ export function App() {
             onSkip={() => {
               setPracticeShowAnswer(false);
               setPracticeResponseTimeMs(undefined);
-              setPracticeIndex((current) => Math.min(current + 1, Math.max(0, practiceQueue.length - 1)));
+              setPracticeIndex((current) => Math.min(current + 1, practiceQueue.length));
             }}
             onRate={(rating, clozeResult) => void ratePractice(rating, clozeResult)}
             onOpenCard={openCardSource}
@@ -1414,6 +1423,7 @@ export function App() {
             onSelectNode={setSelectedNode}
             onStartDue={startGraphReview}
             onPractice={startGraphPractice}
+            onGenerateCards={() => setScreen("generate")}
             onOpenCard={openCardSource}
             onOpenPageByName={(name) => void openPageByName(name)}
           />
@@ -2424,17 +2434,61 @@ function BlockView({
   );
 }
 
+function EmptyState({
+  title,
+  message,
+  actions = [],
+}: {
+  title: string;
+  message: string;
+  actions?: Array<{ label: string; onClick: () => void; primary?: boolean }>;
+}) {
+  return (
+    <section className="empty">
+      <div className="empty-card">
+        <h2>{title}</h2>
+        <p>{message}</p>
+        {actions.length > 0 && (
+          <div className="button-row">
+            {actions.map((action) => (
+              <button
+                key={action.label}
+                className={action.primary ? "primary" : undefined}
+                onClick={action.onClick}
+              >
+                {action.label}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 function DashboardView({
   decks,
+  onGenerateCards,
   onReviewDeck,
   onPracticeDeck,
   onShowGraph,
 }: {
   decks: Array<{ deck: string; deck_slug: string; total: number; due: number; weak: number; newCards: number }>;
+  onGenerateCards: () => void;
   onReviewDeck: (deckSlug: string) => void;
   onPracticeDeck: (deckSlug: string, mode: PracticeMode) => void;
   onShowGraph: (deckSlug: string) => void;
 }) {
+  if (decks.length === 0) {
+    return (
+      <EmptyState
+        title="No cards yet"
+        message="Create cards from notes or generate a first local preview deck to unlock review, practice, and graph views."
+        actions={[{ label: "Generate Cards", onClick: onGenerateCards, primary: true }]}
+      />
+    );
+  }
+
   return (
     <section className="deck-grid">
       {decks.map((deck) => (
@@ -2604,11 +2658,25 @@ function TodoView({
         <span>~{queueSummary.estimatedMinutes} min</span>
       </div>
 
-      <div className="todo-board">
-        <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
-        <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
-        <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
-      </div>
+      {items.length === 0 ? (
+        <EmptyState
+          title="No learning to-dos yet"
+          message="Capture a TODO above or add sgd-todo:: open to a source block. Due, weak, overdue, and new-card topics will also appear here automatically."
+          actions={[{ label: "Add TODO", onClick: () => onCreate(draft || "TODO Review today's weakest topic", effectiveTargetPageId), primary: true }]}
+        />
+      ) : filteredItems.length === 0 ? (
+        <EmptyState
+          title="No to-dos match this filter"
+          message="Clear or loosen the filter to see your open, next-up, and done learning tasks."
+          actions={[{ label: "Clear filter", onClick: () => setFilter(""), primary: true }]}
+        />
+      ) : (
+        <div className="todo-board">
+          <TodoColumn title="Open / To learn" items={openItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
+          <TodoColumn title="Next up" items={doingItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
+          <TodoColumn title="Done" items={doneItems} onSetStatus={onSetStatus} onLearnItem={onLearnItem} onEditBlock={onEditBlock} />
+        </div>
+      )}
     </section>
   );
 }
@@ -2736,9 +2804,11 @@ function ClozeAnswer({
 }) {
   const cloze = useMemo(() => buildClozePrompt(card), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
   const [answers, setAnswers] = useState<string[]>(() => cloze.blanks.map(() => ""));
+  const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
 
   useEffect(() => {
     setAnswers(cloze.blanks.map(() => ""));
+    requestAnimationFrame(() => inputRefs.current[0]?.focus());
   }, [cloze.text]);
 
   const evaluation = evaluateClozeAnswers(cloze.blanks, answers);
@@ -2751,10 +2821,39 @@ function ClozeAnswer({
     onResultChange?.(sessionResult);
   }, [onResultChange, sessionResult]);
 
+  function focusBlank(blankIndex: number) {
+    if (blankIndex < 0) return;
+    requestAnimationFrame(() => inputRefs.current[blankIndex]?.focus());
+  }
+
+  function nextBlankIndex(fromIndex: number, nextAnswers = answers) {
+    for (let candidate = fromIndex + 1; candidate < cloze.blanks.length; candidate += 1) {
+      if (!(nextAnswers[candidate] ?? "").trim()) return candidate;
+    }
+    return fromIndex + 1 < cloze.blanks.length ? fromIndex + 1 : -1;
+  }
+
+  function applySuggestedRating() {
+    if (onRate && evaluation.filledCount === cloze.blanks.length) {
+      onRate(evaluation.suggestedRating, sessionResult);
+    }
+  }
+
+  function updateAnswer(blankIndex: number, value: string) {
+    setAnswers((current) => {
+      const next = current.map((answer, answerIndex) => answerIndex === blankIndex ? value : answer);
+      if (clozeAnswerMatches(value, cloze.blanks[blankIndex] ?? "").correct) {
+        const nextIndex = nextBlankIndex(blankIndex, next);
+        if (nextIndex >= 0) focusBlank(nextIndex);
+      }
+      return next;
+    });
+  }
+
   return (
     <article className="answer-card cloze-card">
       <h3>AI Cloze Answer</h3>
-      <p className="cloze-hint">Fill the blacked-out key words. Umlauts, common transliterations, and small typos are tolerated.</p>
+      <p className="cloze-hint">Fill the blacked-out key words. Enter moves to the next blank, then applies the suggested rating when all blanks are checked. Tab keeps normal navigation.</p>
       <div className="cloze-text">
         {cloze.parts.map((part, index) => (
           part.kind === "text" ? (
@@ -2762,21 +2861,36 @@ function ClozeAnswer({
           ) : (
             <input
               key={index}
+              ref={(node) => {
+                inputRefs.current[part.blankIndex] = node;
+              }}
               aria-label={`Hidden word ${part.blankIndex + 1}`}
               value={answers[part.blankIndex] ?? ""}
               placeholder="█"
-              onChange={(event) => setAnswers((current) => current.map((value, answerIndex) => answerIndex === part.blankIndex ? event.target.value : value))}
+              onChange={(event) => updateAnswer(part.blankIndex, event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") return;
+                event.preventDefault();
+                const firstEmpty = answers.findIndex((answer) => !answer.trim());
+                if (firstEmpty >= 0) {
+                  const nextIndex = firstEmpty === part.blankIndex ? nextBlankIndex(part.blankIndex) : firstEmpty;
+                  focusBlank(nextIndex >= 0 ? nextIndex : part.blankIndex);
+                  return;
+                }
+                applySuggestedRating();
+              }}
               className={evaluation.results[part.blankIndex]?.correct ? "correct" : evaluation.results[part.blankIndex]?.filled ? "incorrect" : ""}
             />
           )
         ))}
       </div>
+      {cloze.blanks.length === 0 && <p className="empty-inline">No strong cloze blanks could be generated for this answer. Use Classic Q/A for this card.</p>}
       <div className="cloze-evaluation">
         <strong>{evaluation.correctCount}/{cloze.blanks.length} correct</strong>
         <span>Suggested rating: {ratingLabel(evaluation.suggestedRating)}</span>
         <small>{evaluation.message}</small>
         {onRate && evaluation.filledCount === cloze.blanks.length && (
-          <button onClick={() => onRate(evaluation.suggestedRating, sessionResult)}>Apply suggested rating</button>
+          <button onClick={applySuggestedRating}>Apply suggested rating</button>
         )}
       </div>
       {evaluation.results.some((result) => result.filled && !result.correct) && (
@@ -2856,6 +2970,41 @@ function SessionStatsPanel({
   );
 }
 
+function SessionCompletionState({
+  title,
+  message,
+  stats,
+  actions,
+}: {
+  title: string;
+  message: string;
+  stats: SessionAnswerStat[];
+  actions: Array<{ label: string; onClick: () => void; primary?: boolean }>;
+}) {
+  return (
+    <section className="empty session-complete">
+      <div className="empty-card">
+        <h2>{title}</h2>
+        <p>{message}</p>
+        {stats.length > 0 && <SessionStatsPanel stats={stats} />}
+        <div className="button-row">
+          {actions.map((action) => (
+            <button key={action.label} className={action.primary ? "primary" : undefined} onClick={action.onClick}>
+              {action.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function isInteractiveKeyTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return Boolean(target.closest("input, textarea, select, button, a, [contenteditable='true']"));
+}
+
+
 function ReviewView({
   card,
   index,
@@ -2867,6 +3016,10 @@ function ReviewView({
   responseTimeMs,
   sessionStats,
   recentSummaries,
+  allCardCount,
+  onStartPractice,
+  onGenerateCards,
+  onOpenEditDesk,
   onShowAnswer,
   onSkip,
   onRate,
@@ -2882,6 +3035,10 @@ function ReviewView({
   responseTimeMs?: number;
   sessionStats: SessionAnswerStat[];
   recentSummaries: StoredSessionSummary[];
+  allCardCount: number;
+  onStartPractice: () => void;
+  onGenerateCards: () => void;
+  onOpenEditDesk: () => void;
   onShowAnswer: () => void;
   onSkip: () => void;
   onRate: (rating: Rating, clozeResult?: ClozeSessionResult) => void;
@@ -2889,7 +3046,7 @@ function ReviewView({
 }) {
   const reviewRef = useRef<HTMLElement | null>(null);
   const [latestClozeResult, setLatestClozeResult] = useState<ClozeSessionResult | undefined>();
-  const progress = total > 0 ? Math.round(((index + 1) / total) * 100) : 0;
+  const progress = total > 0 ? Math.min(100, Math.round(((index + 1) / total) * 100)) : 0;
   const ratingClozeResult = studyMode === "cloze" ? latestClozeResult : undefined;
 
   useEffect(() => {
@@ -2897,15 +3054,38 @@ function ReviewView({
   }, [card?.id, showAnswer, studyMode]);
 
   useEffect(() => {
+    if (showAnswer && studyMode === "cloze") return;
     window.setTimeout(() => reviewRef.current?.focus(), 0);
-  }, [card?.id, showAnswer]);
+  }, [card?.id, showAnswer, studyMode]);
 
   if (!card) {
+    if (sessionStats.length > 0) {
+      return (
+        <SessionCompletionState
+          title="Review session complete"
+          message={`Nice. ${sessionStats.length} card${sessionStats.length === 1 ? "" : "s"} handled for ${scopeLabel}.`}
+          stats={sessionStats}
+          actions={[
+            { label: "Free Practice", onClick: onStartPractice, primary: true },
+            { label: "Generate More Cards", onClick: onGenerateCards },
+          ]}
+        />
+      );
+    }
+
     return (
-      <section className="empty">
-        <h2>No due cards right now.</h2>
-        <p>Use Free Practice or add new #card blocks in Edit Desk.</p>
-      </section>
+      <EmptyState
+        title={allCardCount === 0 ? "No cards yet" : "No due cards right now"}
+        message={allCardCount === 0
+          ? "Create or generate a first card to start a review session."
+          : `Nothing is due in ${scopeLabel}. Keep momentum with Free Practice or add new cards.`}
+        actions={allCardCount === 0
+          ? [
+              { label: "Generate Cards", onClick: onGenerateCards, primary: true },
+              { label: "Edit Desk", onClick: onOpenEditDesk },
+            ]
+          : [{ label: "Free Practice", onClick: onStartPractice, primary: true }]}
+      />
     );
   }
 
@@ -2915,6 +3095,7 @@ function ReviewView({
       ref={reviewRef}
       tabIndex={0}
       onKeyDown={(event) => {
+        if (isInteractiveKeyTarget(event.target)) return;
         if (!showAnswer && (event.key === " " || event.key === "Enter")) {
           event.preventDefault();
           onShowAnswer();
@@ -2931,6 +3112,11 @@ function ReviewView({
           return;
         }
         if (showAnswer) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onRate(studyMode === "cloze" ? (latestClozeResult?.suggestedRating ?? "good") : "good", ratingClozeResult);
+            return;
+          }
           const ratingByKey: Record<string, Rating> = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
           const rating = ratingByKey[event.key];
           if (rating) {
@@ -2946,6 +3132,7 @@ function ReviewView({
           <span style={{ width: `${progress}%` }} />
         </div>
       </div>
+      <p className="keyboard-hint">Enter/Space reveal · 1 Again · 2 Hard · 3 Good · 4 Easy · S skip · O source · Tab moves normally</p>
       <StudyModeToggle mode={studyMode} onChange={onStudyModeChange} />
       <SessionStatsPanel stats={sessionStats} currentResponseTimeMs={showAnswer ? responseTimeMs : undefined} />
       <RecentSessionSummaries summaries={recentSummaries} />
@@ -3000,6 +3187,9 @@ function FreePracticeView({
   responseTimeMs,
   sessionStats,
   recentSummaries,
+  allCardCount,
+  onGenerateCards,
+  onOpenEditDesk,
   recordRatings,
   onModeChange,
   onDeckChange,
@@ -3023,6 +3213,9 @@ function FreePracticeView({
   responseTimeMs?: number;
   sessionStats: SessionAnswerStat[];
   recentSummaries: StoredSessionSummary[];
+  allCardCount: number;
+  onGenerateCards: () => void;
+  onOpenEditDesk: () => void;
   recordRatings: boolean;
   onModeChange: (mode: PracticeMode) => void;
   onDeckChange: (deckSlug: string) => void;
@@ -3041,15 +3234,16 @@ function FreePracticeView({
       : mode === "all"
         ? "All decks"
         : decks.find((deck) => deck.deck_slug === deckSlug)?.deck ?? "All decks";
-  const progress = total > 0 ? Math.round(((index + 1) / total) * 100) : 0;
+  const progress = total > 0 ? Math.min(100, Math.round(((index + 1) / total) * 100)) : 0;
 
   useEffect(() => {
     setLatestClozeResult(undefined);
   }, [card?.id, showAnswer, studyMode]);
 
   useEffect(() => {
+    if (showAnswer && studyMode === "cloze") return;
     window.setTimeout(() => practiceRef.current?.focus(), 0);
-  }, [card?.id, showAnswer, mode, deckSlug]);
+  }, [card?.id, showAnswer, studyMode, mode, deckSlug]);
 
   return (
     <section
@@ -3057,7 +3251,7 @@ function FreePracticeView({
       ref={practiceRef}
       tabIndex={0}
       onKeyDown={(event) => {
-        if (!card) return;
+        if (!card || isInteractiveKeyTarget(event.target)) return;
         if (!showAnswer && (event.key === " " || event.key === "Enter")) {
           event.preventDefault();
           onShowAnswer();
@@ -3074,6 +3268,11 @@ function FreePracticeView({
           return;
         }
         if (showAnswer) {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            onRate(studyMode === "cloze" ? (latestClozeResult?.suggestedRating ?? "good") : "good", ratingClozeResult);
+            return;
+          }
           const ratingByKey: Record<string, Rating> = { "1": "again", "2": "hard", "3": "good", "4": "easy" };
           const rating = ratingByKey[event.key];
           if (rating) {
@@ -3114,6 +3313,7 @@ function FreePracticeView({
       </div>
 
       <StudyModeToggle mode={studyMode} onChange={onStudyModeChange} />
+      <p className="keyboard-hint">Enter/Space reveal · 1 Again · 2 Hard · 3 Good · 4 Easy · S skip · O source · Tab moves normally</p>
 
       <div className="practice-summary">
         <span>{total} cards in queue</span>
@@ -3125,7 +3325,30 @@ function FreePracticeView({
       <RecentSessionSummaries summaries={recentSummaries} />
 
       {!card ? (
-        <section className="empty">No cards match this practice filter.</section>
+        sessionStats.length > 0 ? (
+          <SessionCompletionState
+            title="Practice session complete"
+            message={`You reached the end of ${selectedDeckLabel}.`}
+            stats={sessionStats}
+            actions={[
+              { label: "All Cards", onClick: () => onModeChange("all"), primary: true },
+              { label: "Generate More Cards", onClick: onGenerateCards },
+            ]}
+          />
+        ) : (
+          <EmptyState
+            title={allCardCount === 0 ? "No cards yet" : "No cards match this practice filter"}
+            message={allCardCount === 0
+              ? "Create or generate a first card before starting practice."
+              : "Try All cards, choose another deck, or add cards for this filter."}
+            actions={allCardCount === 0
+              ? [
+                  { label: "Generate Cards", onClick: onGenerateCards, primary: true },
+                  { label: "Edit Desk", onClick: onOpenEditDesk },
+                ]
+              : [{ label: "All Cards", onClick: () => onModeChange("all"), primary: true }]}
+          />
+        )
       ) : (
         <>
           <div className="review-session-head">
@@ -3179,6 +3402,7 @@ function GraphView({
   onSelectNode,
   onStartDue,
   onPractice,
+  onGenerateCards,
   onOpenCard,
   onOpenPageByName,
 }: {
@@ -3187,6 +3411,7 @@ function GraphView({
   onSelectNode: (node: StudyGraphNode) => void;
   onStartDue: (node: StudyGraphNode) => void;
   onPractice: (node: StudyGraphNode) => void;
+  onGenerateCards: () => void;
   onOpenCard: (card: StudyCard) => void;
   onOpenPageByName: (name: string) => void;
 }) {
@@ -3335,7 +3560,20 @@ function GraphView({
           </svg>
           {layout.nodes.length === 0 && (
             <div className="graph-empty">
-              No graph nodes match these filters.
+              <div className="empty-card compact">
+                <h2>{snapshot.cards.length === 0 ? "Graph is empty" : "No graph nodes match these filters"}</h2>
+                <p>{snapshot.cards.length === 0
+                  ? "Add or generate cards first; decks, topics, linked pages, and cards will appear here automatically."
+                  : "Reset filters to see the full learning graph again."}</p>
+                {snapshot.cards.length === 0 ? (
+                  <button className="primary" onClick={onGenerateCards}>Generate Cards</button>
+                ) : (
+                  <button className="primary" onClick={() => {
+                    setStatusFilter("all");
+                    setDeckFilter("all");
+                  }}>Reset filters</button>
+                )}
+              </div>
             </div>
           )}
         </div>
