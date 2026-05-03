@@ -7,12 +7,64 @@ use crate::parser::scan_cards_from_pages;
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::path::Path;
 use uuid::Uuid;
+
+const CURRENT_SQLITE_SCHEMA_VERSION: u32 = 3;
+const CURRENT_BACKUP_SCHEMA_VERSION: u32 = 1;
+
+const STORAGE_INDEXES: &[&str] = &[
+    "CREATE INDEX IF NOT EXISTS idx_workspaces_updated_name ON workspaces(updated_at DESC, name ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_pages_workspace_position ON pages(workspace_id, position ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_blocks_page_parent_position ON blocks(page_id, parent_id, position ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_block_properties_key_value ON block_properties(key, value)",
+    "CREATE INDEX IF NOT EXISTS idx_page_links_target_page ON page_links(target_page)",
+    "CREATE INDEX IF NOT EXISTS idx_tags_tag ON tags(tag)",
+    "CREATE INDEX IF NOT EXISTS idx_cards_workspace_deck_topic ON cards(workspace_id, deck_slug, topic_slug)",
+    "CREATE INDEX IF NOT EXISTS idx_cards_workspace_sort ON cards(workspace_id, deck, topic, question)",
+    "CREATE INDEX IF NOT EXISTS idx_cards_workspace_incomplete ON cards(workspace_id, incomplete)",
+    "CREATE INDEX IF NOT EXISTS idx_srs_states_due_state ON srs_states(due_at, state)",
+    "CREATE INDEX IF NOT EXISTS idx_review_events_card_reviewed ON review_events(card_id, reviewed_at ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_review_sessions_workspace_recent ON review_sessions(workspace_id, completed_at DESC, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_review_sessions_workspace_timeline ON review_sessions(workspace_id, COALESCE(completed_at, started_at) DESC, id DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_review_session_items_session_position ON review_session_items(session_id, position ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_doc_pages_workspace_position ON doc_pages(workspace_id, position ASC, updated_at DESC)",
+    "CREATE INDEX IF NOT EXISTS idx_doc_blocks_page_position ON doc_blocks(doc_page_id, position ASC)",
+    "CREATE INDEX IF NOT EXISTS idx_sync_log_workspace_changed ON sync_log(workspace_id, changed_at DESC)",
+];
+
+struct Migration {
+    version: u32,
+    name: &'static str,
+    apply: fn(&Connection) -> StorageResult<()>,
+}
+
+const SQLITE_MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "baseline-schema-version",
+        apply: migration_baseline,
+    },
+    Migration {
+        version: 2,
+        name: "sessions-cloze-settings-doc-metadata",
+        apply: migration_sessions_cloze_settings_doc_metadata,
+    },
+    Migration {
+        version: 3,
+        name: "large-workspace-indexes",
+        apply: migration_large_workspace_indexes,
+    },
+];
 
 pub struct StoragePlan;
 
 impl StoragePlan {
+    pub const CURRENT_SQLITE_SCHEMA_VERSION: u32 = CURRENT_SQLITE_SCHEMA_VERSION;
+    pub const CURRENT_BACKUP_SCHEMA_VERSION: u32 = CURRENT_BACKUP_SCHEMA_VERSION;
+    pub const SQLITE_INDEXES: &'static [&'static str] = STORAGE_INDEXES;
+
     pub const INITIAL_SQLITE_TABLES: &'static [&'static str] = &[
         "workspaces",
         "pages",
@@ -29,6 +81,7 @@ impl StoragePlan {
         "doc_pages",
         "doc_blocks",
         "sync_log",
+        "schema_migrations",
     ];
 }
 
@@ -38,7 +91,29 @@ pub enum StorageError {
     Json(serde_json::Error),
     Uuid(uuid::Error),
     Chrono(chrono::ParseError),
+    UnsupportedBackupSchema { found: u32, supported: u32 },
+    DataIntegrity(String),
 }
+
+impl fmt::Display for StorageError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            StorageError::Sqlite(error) => write!(formatter, "SQLite storage error: {error}"),
+            StorageError::Json(error) => write!(formatter, "JSON storage error: {error}"),
+            StorageError::Uuid(error) => write!(formatter, "UUID parse error: {error}"),
+            StorageError::Chrono(error) => write!(formatter, "date/time parse error: {error}"),
+            StorageError::UnsupportedBackupSchema { found, supported } => write!(
+                formatter,
+                "unsupported backup schema version {found}; supported version is {supported}"
+            ),
+            StorageError::DataIntegrity(message) => {
+                write!(formatter, "storage data integrity error: {message}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for StorageError {}
 
 impl From<rusqlite::Error> for StorageError {
     fn from(error: rusqlite::Error) -> Self {
@@ -255,43 +330,56 @@ impl StudyGraphStorage {
             );
             ",
         )?;
-        self.ensure_doc_page_metadata_columns()?;
-        add_column_if_missing(&self.conn, "review_events", "response_time_ms", "INTEGER")?;
-        add_column_if_missing(
-            &self.conn,
-            "review_session_items",
-            "cloze_result_json",
-            "TEXT",
-        )?;
+        self.apply_migrations()?;
         Ok(())
     }
 
-    fn ensure_doc_page_metadata_columns(&self) -> StorageResult<()> {
-        let mut stmt = self.conn.prepare("PRAGMA table_info(doc_pages)")?;
-        let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
-        let mut names = Vec::new();
-        for column in columns {
-            names.push(column?);
-        }
-        drop(stmt);
-        if !names.iter().any(|name| name == "tags_json") {
+    fn apply_migrations(&self) -> StorageResult<()> {
+        self.conn.execute(
+            "
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version INTEGER PRIMARY KEY,
+                name TEXT NOT NULL,
+                applied_at TEXT NOT NULL
+            )
+            ",
+            [],
+        )?;
+
+        for migration in SQLITE_MIGRATIONS {
+            let applied = self
+                .conn
+                .query_row(
+                    "SELECT 1 FROM schema_migrations WHERE version = ?1",
+                    params![migration.version as i64],
+                    |_| Ok(()),
+                )
+                .optional()?
+                .is_some();
+            if applied {
+                continue;
+            }
+
+            (migration.apply)(&self.conn)?;
             self.conn.execute(
-                "ALTER TABLE doc_pages ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
-                [],
+                "
+                INSERT INTO schema_migrations (version, name, applied_at)
+                VALUES (?1, ?2, ?3)
+                ON CONFLICT(version) DO UPDATE SET
+                    name = excluded.name,
+                    applied_at = excluded.applied_at
+                ",
+                params![
+                    migration.version as i64,
+                    migration.name,
+                    Utc::now().to_rfc3339(),
+                ],
             )?;
         }
-        if !names.iter().any(|name| name == "source") {
-            self.conn.execute(
-                "ALTER TABLE doc_pages ADD COLUMN source TEXT NOT NULL DEFAULT ''",
-                [],
-            )?;
-        }
-        if !names.iter().any(|name| name == "language") {
-            self.conn.execute(
-                "ALTER TABLE doc_pages ADD COLUMN language TEXT NOT NULL DEFAULT 'auto'",
-                [],
-            )?;
-        }
+
+        self.conn.execute_batch(&format!(
+            "PRAGMA user_version = {CURRENT_SQLITE_SCHEMA_VERSION};"
+        ))?;
         Ok(())
     }
 
@@ -447,9 +535,9 @@ impl StudyGraphStorage {
         for row in rows {
             let row = row?;
             let card_id = Uuid::parse_str(&row.id)?;
-            let srs = self
-                .load_srs_state(card_id)?
-                .ok_or_else(|| rusqlite::Error::QueryReturnedNoRows)?;
+            let srs = self.load_srs_state(card_id)?.ok_or_else(|| {
+                StorageError::DataIntegrity(format!("missing SRS state for indexed card {card_id}"))
+            })?;
             cards.push(StudyCard {
                 id: card_id,
                 block_id: Uuid::parse_str(&row.block_id)?,
@@ -636,6 +724,36 @@ impl StudyGraphStorage {
         Ok(sessions)
     }
 
+    fn load_all_review_sessions(&self, workspace_id: Uuid) -> StorageResult<Vec<ReviewSession>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT id, workspace_id, kind, scope_label, started_at, completed_at
+            FROM review_sessions
+            WHERE workspace_id = ?1
+            ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+            ",
+        )?;
+        let rows = stmt.query_map(params![workspace_id.to_string()], |row| {
+            Ok(StoredReviewSessionRow {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                kind: row.get(2)?,
+                scope_label: row.get(3)?,
+                started_at: row.get(4)?,
+                completed_at: row.get(5)?,
+            })
+        })?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let row = row?;
+            let session_id = Uuid::parse_str(&row.id)?;
+            let items = self.load_review_session_items(session_id)?;
+            sessions.push(review_session_from_row(row, items)?);
+        }
+        Ok(sessions)
+    }
+
     fn load_review_session_items(&self, session_id: Uuid) -> StorageResult<Vec<ReviewSessionItem>> {
         let mut stmt = self.conn.prepare(
             "
@@ -733,20 +851,50 @@ impl StudyGraphStorage {
         }
 
         Ok(AppBackup {
-            schema_version: 1,
+            schema_version: CURRENT_BACKUP_SCHEMA_VERSION,
             exported_at: Utc::now(),
             workspace,
             cards,
             review_events,
-            review_sessions: self.load_review_sessions(workspace_id, 100)?,
+            review_sessions: self.load_all_review_sessions(workspace_id)?,
             settings: self.load_app_settings(workspace_id)?,
             doc_pages: self.load_doc_pages(workspace_id)?,
         })
     }
 
     pub fn restore_app_backup(&mut self, backup: &AppBackup) -> StorageResult<()> {
+        if backup.schema_version == 0 || backup.schema_version > CURRENT_BACKUP_SCHEMA_VERSION {
+            return Err(StorageError::UnsupportedBackupSchema {
+                found: backup.schema_version,
+                supported: CURRENT_BACKUP_SCHEMA_VERSION,
+            });
+        }
+
         self.save_workspace(&backup.workspace)?;
         self.save_app_settings(backup.workspace.id, &backup.settings)?;
+
+        self.conn.execute(
+            "
+            DELETE FROM review_events
+            WHERE card_id IN (
+                SELECT id FROM cards WHERE workspace_id = ?1
+            )
+            ",
+            params![backup.workspace.id.to_string()],
+        )?;
+        self.conn.execute(
+            "
+            DELETE FROM srs_states
+            WHERE card_id IN (
+                SELECT id FROM cards WHERE workspace_id = ?1
+            )
+            ",
+            params![backup.workspace.id.to_string()],
+        )?;
+        for card in &backup.cards {
+            upsert_srs_state_conn(&self.conn, card.id, &card.srs)?;
+        }
+
         self.conn.execute(
             "DELETE FROM review_sessions WHERE workspace_id = ?1",
             params![backup.workspace.id.to_string()],
@@ -1544,6 +1692,57 @@ fn normalize_doc_tags(tags: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn migration_baseline(_conn: &Connection) -> StorageResult<()> {
+    Ok(())
+}
+
+fn migration_sessions_cloze_settings_doc_metadata(conn: &Connection) -> StorageResult<()> {
+    ensure_doc_page_metadata_columns_conn(conn)?;
+    add_column_if_missing(conn, "review_events", "response_time_ms", "INTEGER")?;
+    add_column_if_missing(conn, "review_session_items", "cloze_result_json", "TEXT")?;
+    Ok(())
+}
+
+fn migration_large_workspace_indexes(conn: &Connection) -> StorageResult<()> {
+    ensure_storage_indexes(conn)
+}
+
+fn ensure_doc_page_metadata_columns_conn(conn: &Connection) -> StorageResult<()> {
+    let mut stmt = conn.prepare("PRAGMA table_info(doc_pages)")?;
+    let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    let mut names = Vec::new();
+    for column in columns {
+        names.push(column?);
+    }
+    drop(stmt);
+    if !names.iter().any(|name| name == "tags_json") {
+        conn.execute(
+            "ALTER TABLE doc_pages ADD COLUMN tags_json TEXT NOT NULL DEFAULT '[]'",
+            [],
+        )?;
+    }
+    if !names.iter().any(|name| name == "source") {
+        conn.execute(
+            "ALTER TABLE doc_pages ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+            [],
+        )?;
+    }
+    if !names.iter().any(|name| name == "language") {
+        conn.execute(
+            "ALTER TABLE doc_pages ADD COLUMN language TEXT NOT NULL DEFAULT 'auto'",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+fn ensure_storage_indexes(conn: &Connection) -> StorageResult<()> {
+    for index_sql in STORAGE_INDEXES {
+        conn.execute(index_sql, [])?;
+    }
+    Ok(())
+}
+
 fn add_column_if_missing(
     conn: &Connection,
     table_name: &str,
@@ -1699,6 +1898,119 @@ mod tests {
     use crate::scheduler::{schedule_review, SchedulerSettings};
     use chrono::TimeZone;
     use pretty_assertions::assert_eq;
+
+    fn column_exists(conn: &Connection, table_name: &str, column_name: &str) -> bool {
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table_name})"))
+            .unwrap();
+        let columns = stmt.query_map([], |row| row.get::<_, String>(1)).unwrap();
+
+        let exists = columns
+            .map(|column| column.unwrap())
+            .any(|name| name == column_name);
+        exists
+    }
+
+    fn index_exists(conn: &Connection, index_name: &str) -> bool {
+        conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1",
+            params![index_name],
+            |_| Ok(()),
+        )
+        .optional()
+        .unwrap()
+        .is_some()
+    }
+
+    #[test]
+    fn migrates_legacy_schema_records_version_and_adds_indexes() {
+        let db_path = std::env::temp_dir().join(format!(
+            "studygraph-migration-test-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(
+                "
+                PRAGMA user_version = 0;
+
+                CREATE TABLE doc_pages (
+                    id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    title TEXT NOT NULL,
+                    icon TEXT NOT NULL,
+                    position INTEGER NOT NULL,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE review_events (
+                    id TEXT PRIMARY KEY,
+                    card_id TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    reviewed_at TEXT NOT NULL,
+                    previous_srs_json TEXT NOT NULL,
+                    next_srs_json TEXT NOT NULL
+                );
+
+                CREATE TABLE review_session_items (
+                    id TEXT PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    card_id TEXT NOT NULL,
+                    question TEXT NOT NULL,
+                    rating TEXT NOT NULL,
+                    response_time_ms INTEGER,
+                    answered_at TEXT NOT NULL,
+                    position INTEGER NOT NULL
+                );
+                ",
+            )
+            .unwrap();
+        }
+
+        let storage = StudyGraphStorage::open(&db_path).unwrap();
+
+        assert!(column_exists(&storage.conn, "doc_pages", "tags_json"));
+        assert!(column_exists(&storage.conn, "doc_pages", "source"));
+        assert!(column_exists(&storage.conn, "doc_pages", "language"));
+        assert!(column_exists(
+            &storage.conn,
+            "review_events",
+            "response_time_ms"
+        ));
+        assert!(column_exists(
+            &storage.conn,
+            "review_session_items",
+            "cloze_result_json"
+        ));
+        assert!(index_exists(
+            &storage.conn,
+            "idx_cards_workspace_deck_topic"
+        ));
+        assert!(index_exists(
+            &storage.conn,
+            "idx_doc_pages_workspace_position"
+        ));
+
+        let user_version = storage
+            .conn
+            .query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
+            .unwrap();
+        let migration_count = storage
+            .conn
+            .query_row("SELECT COUNT(*) FROM schema_migrations", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap();
+        drop(storage);
+        std::fs::remove_file(&db_path).ok();
+
+        assert_eq!(
+            user_version,
+            StoragePlan::CURRENT_SQLITE_SCHEMA_VERSION as i64
+        );
+        assert_eq!(migration_count, 3);
+    }
 
     #[test]
     fn saves_and_loads_workspace_with_page_tree() {
@@ -2092,6 +2404,7 @@ mod tests {
 
         let mut target = StudyGraphStorage::in_memory().unwrap();
         target.restore_app_backup(&backup).unwrap();
+        target.restore_app_backup(&backup).unwrap();
         let restored = target.export_app_backup(workspace.id).unwrap();
 
         assert_eq!(restored.workspace.name, "Backup");
@@ -2109,6 +2422,67 @@ mod tests {
         );
         assert_eq!(restored.settings.default_deck, "CPU");
         assert_eq!(restored.doc_pages[0].title, "CPU Docs");
+    }
+
+    #[test]
+    fn export_app_backup_includes_more_than_recent_session_limit() {
+        let workspace = Workspace {
+            id: Uuid::new_v4(),
+            name: "Many Sessions".to_string(),
+            pages: Vec::new(),
+        };
+        let mut storage = StudyGraphStorage::in_memory().unwrap();
+        storage.save_workspace(&workspace).unwrap();
+
+        let started_at = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        for offset in 0..105 {
+            storage
+                .save_review_session(&ReviewSession {
+                    id: Uuid::new_v4(),
+                    workspace_id: workspace.id,
+                    kind: ReviewSessionKind::Practice,
+                    scope_label: format!("Practice {offset}"),
+                    started_at: started_at + chrono::Duration::seconds(offset),
+                    completed_at: None,
+                    items: Vec::new(),
+                })
+                .unwrap();
+        }
+
+        let recent = storage.load_review_sessions(workspace.id, 200).unwrap();
+        let backup = storage.export_app_backup(workspace.id).unwrap();
+
+        assert_eq!(recent.len(), 100);
+        assert_eq!(backup.review_sessions.len(), 105);
+    }
+
+    #[test]
+    fn rejects_unsupported_backup_schema_version() {
+        let workspace = Workspace {
+            id: Uuid::new_v4(),
+            name: "Future Backup".to_string(),
+            pages: Vec::new(),
+        };
+        let backup = AppBackup {
+            schema_version: StoragePlan::CURRENT_BACKUP_SCHEMA_VERSION + 1,
+            exported_at: Utc::now(),
+            workspace,
+            cards: Vec::new(),
+            review_events: Vec::new(),
+            review_sessions: Vec::new(),
+            settings: AppSettings::default(),
+            doc_pages: Vec::new(),
+        };
+        let mut storage = StudyGraphStorage::in_memory().unwrap();
+
+        let error = storage.restore_app_backup(&backup).unwrap_err();
+
+        assert!(matches!(
+            error,
+            StorageError::UnsupportedBackupSchema { found, supported }
+                if found == StoragePlan::CURRENT_BACKUP_SCHEMA_VERSION + 1
+                    && supported == StoragePlan::CURRENT_BACKUP_SCHEMA_VERSION
+        ));
     }
 
     #[test]
