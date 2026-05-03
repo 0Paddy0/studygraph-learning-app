@@ -125,12 +125,36 @@ export interface ReviewEvent {
   next_srs: SrsState;
 }
 
+export type ReviewSessionKind = "review" | "practice";
+
+export interface ReviewSessionItem {
+  id: string;
+  sessionId: string;
+  cardId: string;
+  question: string;
+  rating: Rating;
+  responseTimeMs?: number | null;
+  answeredAt: string;
+  position: number;
+}
+
+export interface ReviewSession {
+  id: string;
+  workspaceId: string;
+  kind: ReviewSessionKind;
+  scopeLabel: string;
+  startedAt: string;
+  completedAt?: string | null;
+  items: ReviewSessionItem[];
+}
+
 export interface AppBackup {
   schemaVersion: number;
   exportedAt: string;
   workspace: Workspace;
   cards: StudyCard[];
   reviewEvents: ReviewEvent[];
+  reviewSessions: ReviewSession[];
   settings: AppSettings;
   docPages: DocPage[];
 }

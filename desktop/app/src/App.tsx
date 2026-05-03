@@ -22,6 +22,7 @@ import {
   insertGeneratedCards,
   loadDocPages,
   loadAppSettings as loadStoredAppSettings,
+  loadReviewSessions,
   loadSnapshot,
   moveDocBlock,
   outdentBlock,
@@ -35,6 +36,7 @@ import {
   removePageProperty,
   reviewCard,
   saveAppSettings as saveStoredAppSettings,
+  saveReviewSession,
   setPageProperty,
   setBlockProperty,
   updateDocBlock,
@@ -56,6 +58,8 @@ import type {
   GeneratedCard,
   Page,
   Rating,
+  ReviewSession,
+  ReviewSessionKind,
   StudyCard,
   StudyGraphNode,
   WorkspaceExport,
@@ -101,10 +105,12 @@ interface TodoItem {
 }
 
 interface SessionAnswerStat {
+  id: string;
   cardId: string;
   question: string;
   rating: Rating;
   responseTimeMs?: number;
+  answeredAt: string;
 }
 
 interface StoredSessionSummary {
@@ -143,6 +149,8 @@ export function App() {
   const [studyMode, setStudyMode] = useState<StudyMode>("classic");
   const [reviewStartedAt, setReviewStartedAt] = useState(() => Date.now());
   const [reviewResponseTimeMs, setReviewResponseTimeMs] = useState<number | undefined>();
+  const [reviewSessionId, setReviewSessionId] = useState(() => randomUuid());
+  const [reviewSessionStartedAt, setReviewSessionStartedAt] = useState(() => new Date().toISOString());
   const [reviewSessionStats, setReviewSessionStats] = useState<SessionAnswerStat[]>([]);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("all");
   const [practiceDeckSlug, setPracticeDeckSlug] = useState<string>("");
@@ -153,8 +161,10 @@ export function App() {
   const [practiceStudyMode, setPracticeStudyMode] = useState<StudyMode>("classic");
   const [practiceStartedAt, setPracticeStartedAt] = useState(() => Date.now());
   const [practiceResponseTimeMs, setPracticeResponseTimeMs] = useState<number | undefined>();
+  const [practiceSessionId, setPracticeSessionId] = useState(() => randomUuid());
+  const [practiceSessionStartedAt, setPracticeSessionStartedAt] = useState(() => new Date().toISOString());
   const [practiceSessionStats, setPracticeSessionStats] = useState<SessionAnswerStat[]>([]);
-  const [sessionSummaries, setSessionSummaries] = useState<StoredSessionSummary[]>(() => loadStoredSessionSummaries());
+  const [sessionSummaries, setSessionSummaries] = useState<StoredSessionSummary[]>([]);
   const [practiceRecordRatings, setPracticeRecordRatings] = useState(false);
   const [selectedNode, setSelectedNode] = useState<StudyGraphNode | null>(null);
   const [pageName, setPageName] = useState("Imported Page");
@@ -206,6 +216,7 @@ export function App() {
     void refresh();
     void loadSettingsFromStorage();
     void loadDocsFromStorage();
+    void loadReviewSessionSummariesFromStorage();
   }, []);
 
   function revealReviewAnswer() {
@@ -317,6 +328,24 @@ export function App() {
     }
   }
 
+  async function loadReviewSessionSummariesFromStorage() {
+    try {
+      const sessions = await loadReviewSessions();
+      setSessionSummaries(sessions.map(reviewSessionToStoredSummary));
+    } catch {
+      setSessionSummaries([]);
+    }
+  }
+
+  async function persistReviewSession(session: ReviewSession) {
+    try {
+      const sessions = await saveReviewSession(session);
+      setSessionSummaries(sessions.map(reviewSessionToStoredSummary));
+    } catch {
+      setSessionSummaries((current) => upsertSessionSummary(current, reviewSessionToStoredSummary(session)));
+    }
+  }
+
   async function runDocMutation(action: () => Promise<DocPage[]>, selectPageId?: string) {
     setDocStatus("Saving docs...");
     try {
@@ -421,10 +450,12 @@ export function App() {
     try {
       const next = await reviewCard(card.id, rating, reviewResponseTimeMs);
       setReviewSessionStats((current) => [...current, {
+        id: randomUuid(),
         cardId: card.id,
         question: card.question,
         rating,
         responseTimeMs: reviewResponseTimeMs,
+        answeredAt: new Date().toISOString(),
       }]);
       setSnapshot(next);
       setShowAnswer(false);
@@ -451,10 +482,12 @@ export function App() {
     try {
       const next = await reviewCard(card.id, rating, practiceResponseTimeMs);
       setPracticeSessionStats((current) => [...current, {
+        id: randomUuid(),
         cardId: card.id,
         question: card.question,
         rating,
         responseTimeMs: practiceResponseTimeMs,
+        answeredAt: new Date().toISOString(),
       }]);
       setSnapshot(next);
       setPracticeShowAnswer(false);
@@ -905,6 +938,8 @@ export function App() {
   function startDueReview(nodeId: string | null = null, label = "All due cards") {
     setReviewNodeId(nodeId);
     setReviewScopeLabel(label);
+    setReviewSessionId(randomUuid());
+    setReviewSessionStartedAt(new Date().toISOString());
     setSelectedCardIndex(0);
     setShowAnswer(false);
     setReviewSessionStats([]);
@@ -916,6 +951,8 @@ export function App() {
     setPracticeDeckSlug(deckSlug);
     setPracticeNodeId(nodeId);
     setPracticeScopeLabel(label);
+    setPracticeSessionId(randomUuid());
+    setPracticeSessionStartedAt(new Date().toISOString());
     setPracticeIndex(0);
     setPracticeShowAnswer(false);
     setPracticeSessionStats([]);
@@ -1026,16 +1063,30 @@ export function App() {
   }, [currentPracticeCard?.id]);
 
   useEffect(() => {
-    if (reviewSessionStats.length === 0) return;
-    const summary = buildStoredSessionSummary("review", reviewScopeLabel, reviewSessionStats);
-    setSessionSummaries((current) => saveStoredSessionSummaries(upsertSessionSummary(current, summary)));
-  }, [reviewSessionStats, reviewScopeLabel]);
+    if (!snapshot || reviewSessionStats.length === 0) return;
+    const session = buildReviewSession(
+      snapshot.workspace.id,
+      reviewSessionId,
+      "review",
+      reviewScopeLabel,
+      reviewSessionStartedAt,
+      reviewSessionStats,
+    );
+    void persistReviewSession(session);
+  }, [snapshot?.workspace.id, reviewSessionId, reviewSessionStartedAt, reviewSessionStats, reviewScopeLabel]);
 
   useEffect(() => {
-    if (practiceSessionStats.length === 0) return;
-    const summary = buildStoredSessionSummary("practice", practiceScopeLabel, practiceSessionStats);
-    setSessionSummaries((current) => saveStoredSessionSummaries(upsertSessionSummary(current, summary)));
-  }, [practiceSessionStats, practiceScopeLabel]);
+    if (!snapshot || practiceSessionStats.length === 0) return;
+    const session = buildReviewSession(
+      snapshot.workspace.id,
+      practiceSessionId,
+      "practice",
+      practiceScopeLabel,
+      practiceSessionStartedAt,
+      practiceSessionStats,
+    );
+    void persistReviewSession(session);
+  }, [snapshot?.workspace.id, practiceSessionId, practiceSessionStartedAt, practiceSessionStats, practiceScopeLabel]);
 
   const selectedDocPage = docPages.find((page) => page.id === selectedDocPageId) ?? docPages[0];
 
@@ -3916,50 +3967,66 @@ function filterDocPages(pages: DocPage[], query: string) {
   });
 }
 
-function loadStoredSessionSummaries(): StoredSessionSummary[] {
-  try {
-    const raw = window.localStorage.getItem("studygraph.sessionSummaries");
-    if (!raw) return [];
-    return (JSON.parse(raw) as StoredSessionSummary[]).slice(0, 20);
-  } catch {
-    return [];
-  }
-}
-
-function saveStoredSessionSummaries(summaries: StoredSessionSummary[]) {
-  const next = summaries.slice(0, 20);
-  try {
-    window.localStorage.setItem("studygraph.sessionSummaries", JSON.stringify(next));
-  } catch {
-    // Session summaries are a convenience cache; ignore localStorage failures.
-  }
-  return next;
-}
-
 function upsertSessionSummary(current: StoredSessionSummary[], summary: StoredSessionSummary) {
   return [summary, ...current.filter((candidate) => candidate.id !== summary.id)].slice(0, 20);
 }
 
-function buildStoredSessionSummary(
-  kind: StoredSessionSummary["kind"],
+function buildReviewSession(
+  workspaceId: string,
+  sessionId: string,
+  kind: ReviewSessionKind,
   scopeLabel: string,
+  startedAt: string,
   stats: SessionAnswerStat[],
-): StoredSessionSummary {
-  const timed = stats.filter((stat) => typeof stat.responseTimeMs === "number");
+): ReviewSession {
+  const completedAt = stats.at(-1)?.answeredAt ?? new Date().toISOString();
   return {
-    id: `${kind}:${scopeLabel}`,
+    id: sessionId,
+    workspaceId,
     kind,
-    completedAt: new Date().toISOString(),
     scopeLabel,
-    answered: stats.length,
+    startedAt,
+    completedAt,
+    items: stats.map((stat, position) => ({
+      id: stat.id,
+      sessionId,
+      cardId: stat.cardId,
+      question: stat.question,
+      rating: stat.rating,
+      responseTimeMs: stat.responseTimeMs,
+      answeredAt: stat.answeredAt,
+      position,
+    })),
+  };
+}
+
+function reviewSessionToStoredSummary(session: ReviewSession): StoredSessionSummary {
+  const timed = session.items.filter((item) => typeof item.responseTimeMs === "number");
+  return {
+    id: session.id,
+    kind: session.kind,
+    completedAt: session.completedAt ?? session.startedAt,
+    scopeLabel: session.scopeLabel,
+    answered: session.items.length,
     averageResponseTimeMs: timed.length > 0
-      ? timed.reduce((sum, stat) => sum + (stat.responseTimeMs ?? 0), 0) / timed.length
+      ? timed.reduce((sum, item) => sum + (item.responseTimeMs ?? 0), 0) / timed.length
       : undefined,
-    counts: stats.reduce<Record<Rating, number>>((acc, stat) => {
-      acc[stat.rating] += 1;
+    counts: session.items.reduce<Record<Rating, number>>((acc, item) => {
+      acc[item.rating] += 1;
       return acc;
     }, { again: 0, hard: 0, good: 0, easy: 0 }),
   };
+}
+
+function randomUuid() {
+  if (typeof crypto !== "undefined" && "randomUUID" in crypto) {
+    return crypto.randomUUID();
+  }
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (char) => {
+    const value = Math.floor(Math.random() * 16);
+    const digit = char === "x" ? value : (value & 0x3) | 0x8;
+    return digit.toString(16);
+  });
 }
 
 function evaluateClozeAnswers(blanks: string[], answers: string[]) {

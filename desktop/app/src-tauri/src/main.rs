@@ -7,9 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use studygraph_core::{
     build_backlinks, build_study_graph, export_page_to_logseq_markdown,
-    import_single_markdown_page, schedule_review_with_response_time, AppBackup, AppSettings, BacklinkReference, Block,
-    DocBlockKind, DocPage, Page, Rating, ReviewEvent, SchedulerSettings, StudyCard, StudyGraphData,
-    StudyGraphStorage, Workspace,
+    import_single_markdown_page, schedule_review_with_response_time, AppBackup, AppSettings,
+    BacklinkReference, Block, DocBlockKind, DocPage, Page, Rating, ReviewEvent, ReviewSession,
+    SchedulerSettings, StudyCard, StudyGraphData, StudyGraphStorage, Workspace,
 };
 use tauri::Manager;
 use uuid::Uuid;
@@ -696,6 +696,35 @@ fn review_card(
 }
 
 #[tauri::command]
+fn load_review_sessions(state: tauri::State<'_, AppState>) -> Result<Vec<ReviewSession>, String> {
+    let workspace_id = ensure_workspace(&state)?;
+    let storage = lock_storage(&state)?;
+    storage
+        .load_review_sessions(workspace_id, 20)
+        .map_err(format_storage_error)
+}
+
+#[tauri::command]
+fn save_review_session(
+    mut session: ReviewSession,
+    state: tauri::State<'_, AppState>,
+) -> Result<Vec<ReviewSession>, String> {
+    let workspace_id = ensure_workspace(&state)?;
+    session.workspace_id = workspace_id;
+    for (position, item) in session.items.iter_mut().enumerate() {
+        item.session_id = session.id;
+        item.position = position as u32;
+    }
+    let storage = lock_storage(&state)?;
+    storage
+        .save_review_session(&session)
+        .map_err(format_storage_error)?;
+    storage
+        .load_review_sessions(workspace_id, 20)
+        .map_err(format_storage_error)
+}
+
+#[tauri::command]
 fn insert_generated_cards(
     page_id: String,
     cards: Vec<GeneratedCardInput>,
@@ -997,6 +1026,8 @@ fn main() {
             remove_block_property,
             delete_block,
             review_card,
+            load_review_sessions,
+            save_review_session,
             insert_generated_cards,
             insert_doc_card,
             export_workspace_markdown,

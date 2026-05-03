@@ -95,6 +95,40 @@ pub struct ReviewEvent {
     pub next_srs: SrsState,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ReviewSessionKind {
+    Review,
+    Practice,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSession {
+    pub id: Uuid,
+    pub workspace_id: WorkspaceId,
+    pub kind: ReviewSessionKind,
+    pub scope_label: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    #[serde(default)]
+    pub items: Vec<ReviewSessionItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewSessionItem {
+    pub id: Uuid,
+    pub session_id: Uuid,
+    pub card_id: CardId,
+    pub question: String,
+    pub rating: Rating,
+    #[serde(default)]
+    pub response_time_ms: Option<u32>,
+    pub answered_at: DateTime<Utc>,
+    pub position: u32,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct AppBackup {
@@ -103,6 +137,8 @@ pub struct AppBackup {
     pub workspace: Workspace,
     pub cards: Vec<StudyCard>,
     pub review_events: Vec<ReviewEvent>,
+    #[serde(default)]
+    pub review_sessions: Vec<ReviewSession>,
     pub settings: AppSettings,
     pub doc_pages: Vec<DocPage>,
 }

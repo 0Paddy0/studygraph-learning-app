@@ -1,6 +1,7 @@
 use crate::model::{
     AppBackup, AppSettings, Block, CardState, DocBlock, DocBlockKind, DocPage, Page, Rating,
-    ReviewEvent, SrsState, StudyCard, Workspace,
+    ReviewEvent, ReviewSession, ReviewSessionItem, ReviewSessionKind, SrsState, StudyCard,
+    Workspace,
 };
 use crate::parser::scan_cards_from_pages;
 use chrono::{DateTime, Utc};
@@ -22,6 +23,8 @@ impl StoragePlan {
         "cards",
         "srs_states",
         "review_events",
+        "review_sessions",
+        "review_session_items",
         "settings",
         "doc_pages",
         "doc_blocks",
@@ -176,6 +179,36 @@ impl StudyGraphStorage {
                 previous_srs_json TEXT NOT NULL,
                 next_srs_json TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS review_sessions (
+                id TEXT PRIMARY KEY,
+                workspace_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                scope_label TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                FOREIGN KEY(workspace_id) REFERENCES workspaces(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS review_session_items (
+                id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                card_id TEXT NOT NULL,
+                question TEXT NOT NULL,
+                rating TEXT NOT NULL,
+                response_time_ms INTEGER,
+                answered_at TEXT NOT NULL,
+                position INTEGER NOT NULL,
+                FOREIGN KEY(session_id) REFERENCES review_sessions(id) ON DELETE CASCADE
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_review_sessions_workspace_recent
+                ON review_sessions(workspace_id, completed_at DESC, updated_at DESC);
+
+            CREATE INDEX IF NOT EXISTS idx_review_session_items_session_position
+                ON review_session_items(session_id, position ASC);
 
             CREATE TABLE IF NOT EXISTS settings (
                 workspace_id TEXT NOT NULL,
@@ -483,7 +516,8 @@ impl StudyGraphStorage {
 
         let mut events = Vec::new();
         for row in rows {
-            let (id, rating, reviewed_at, response_time_ms, previous_srs_json, next_srs_json) = row?;
+            let (id, rating, reviewed_at, response_time_ms, previous_srs_json, next_srs_json) =
+                row?;
             events.push(ReviewEvent {
                 id: Uuid::parse_str(&id)?,
                 card_id,
@@ -495,6 +529,142 @@ impl StudyGraphStorage {
             });
         }
         Ok(events)
+    }
+
+    pub fn save_review_session(&self, session: &ReviewSession) -> StorageResult<()> {
+        let now = Utc::now().to_rfc3339();
+        self.conn.execute(
+            "
+            INSERT INTO review_sessions
+                (id, workspace_id, kind, scope_label, started_at, completed_at, created_at, updated_at)
+            VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+            ON CONFLICT(id) DO UPDATE SET
+                workspace_id = excluded.workspace_id,
+                kind = excluded.kind,
+                scope_label = excluded.scope_label,
+                started_at = excluded.started_at,
+                completed_at = excluded.completed_at,
+                updated_at = excluded.updated_at
+            ",
+            params![
+                session.id.to_string(),
+                session.workspace_id.to_string(),
+                review_session_kind_to_str(session.kind),
+                normalize_text(&session.scope_label, "Study Session"),
+                session.started_at.to_rfc3339(),
+                session.completed_at.map(|value| value.to_rfc3339()),
+                now,
+            ],
+        )?;
+        self.conn.execute(
+            "DELETE FROM review_session_items WHERE session_id = ?1",
+            params![session.id.to_string()],
+        )?;
+        for (position, item) in session.items.iter().enumerate() {
+            insert_review_session_item_conn(&self.conn, session.id, item, position as u32)?;
+        }
+        Ok(())
+    }
+
+    pub fn load_review_session(&self, session_id: Uuid) -> StorageResult<Option<ReviewSession>> {
+        let row = self
+            .conn
+            .query_row(
+                "
+            SELECT id, workspace_id, kind, scope_label, started_at, completed_at
+            FROM review_sessions
+            WHERE id = ?1
+            ",
+                params![session_id.to_string()],
+                |row| {
+                    Ok(StoredReviewSessionRow {
+                        id: row.get(0)?,
+                        workspace_id: row.get(1)?,
+                        kind: row.get(2)?,
+                        scope_label: row.get(3)?,
+                        started_at: row.get(4)?,
+                        completed_at: row.get(5)?,
+                    })
+                },
+            )
+            .optional()?;
+
+        row.map(|row| review_session_from_row(row, self.load_review_session_items(session_id)?))
+            .transpose()
+    }
+
+    pub fn load_review_sessions(
+        &self,
+        workspace_id: Uuid,
+        limit: usize,
+    ) -> StorageResult<Vec<ReviewSession>> {
+        let limit = limit.clamp(1, 100) as i64;
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT id, workspace_id, kind, scope_label, started_at, completed_at
+            FROM review_sessions
+            WHERE workspace_id = ?1
+            ORDER BY COALESCE(completed_at, started_at) DESC, id DESC
+            LIMIT ?2
+            ",
+        )?;
+        let rows = stmt.query_map(params![workspace_id.to_string(), limit], |row| {
+            Ok(StoredReviewSessionRow {
+                id: row.get(0)?,
+                workspace_id: row.get(1)?,
+                kind: row.get(2)?,
+                scope_label: row.get(3)?,
+                started_at: row.get(4)?,
+                completed_at: row.get(5)?,
+            })
+        })?;
+
+        let mut sessions = Vec::new();
+        for row in rows {
+            let row = row?;
+            let session_id = Uuid::parse_str(&row.id)?;
+            let items = self.load_review_session_items(session_id)?;
+            sessions.push(review_session_from_row(row, items)?);
+        }
+        Ok(sessions)
+    }
+
+    fn load_review_session_items(&self, session_id: Uuid) -> StorageResult<Vec<ReviewSessionItem>> {
+        let mut stmt = self.conn.prepare(
+            "
+            SELECT id, card_id, question, rating, response_time_ms, answered_at, position
+            FROM review_session_items
+            WHERE session_id = ?1
+            ORDER BY position ASC, answered_at ASC
+            ",
+        )?;
+        let rows = stmt.query_map(params![session_id.to_string()], |row| {
+            Ok(StoredReviewSessionItemRow {
+                id: row.get(0)?,
+                card_id: row.get(1)?,
+                question: row.get(2)?,
+                rating: row.get(3)?,
+                response_time_ms: row.get(4)?,
+                answered_at: row.get(5)?,
+                position: row.get::<_, i64>(6)?,
+            })
+        })?;
+
+        let mut items = Vec::new();
+        for row in rows {
+            let row = row?;
+            items.push(ReviewSessionItem {
+                id: Uuid::parse_str(&row.id)?,
+                session_id,
+                card_id: Uuid::parse_str(&row.card_id)?,
+                question: row.question,
+                rating: rating_from_str(&row.rating),
+                response_time_ms: row.response_time_ms,
+                answered_at: parse_datetime(&row.answered_at)?,
+                position: row.position.max(0) as u32,
+            });
+        }
+        Ok(items)
     }
 
     pub fn load_app_settings(&self, workspace_id: Uuid) -> StorageResult<AppSettings> {
@@ -555,6 +725,7 @@ impl StudyGraphStorage {
             workspace,
             cards,
             review_events,
+            review_sessions: self.load_review_sessions(workspace_id, 100)?,
             settings: self.load_app_settings(workspace_id)?,
             doc_pages: self.load_doc_pages(workspace_id)?,
         })
@@ -563,6 +734,10 @@ impl StudyGraphStorage {
     pub fn restore_app_backup(&mut self, backup: &AppBackup) -> StorageResult<()> {
         self.save_workspace(&backup.workspace)?;
         self.save_app_settings(backup.workspace.id, &backup.settings)?;
+        self.conn.execute(
+            "DELETE FROM review_sessions WHERE workspace_id = ?1",
+            params![backup.workspace.id.to_string()],
+        )?;
 
         self.conn.execute(
             "DELETE FROM doc_pages WHERE workspace_id = ?1",
@@ -574,6 +749,9 @@ impl StudyGraphStorage {
 
         for event in &backup.review_events {
             self.append_review_event(event)?;
+        }
+        for session in &backup.review_sessions {
+            self.save_review_session(session)?;
         }
 
         Ok(())
@@ -1266,6 +1444,51 @@ fn insert_doc_block_conn(conn: &Connection, page_id: Uuid, block: &DocBlock) -> 
     Ok(())
 }
 
+fn insert_review_session_item_conn(
+    conn: &Connection,
+    session_id: Uuid,
+    item: &ReviewSessionItem,
+    position: u32,
+) -> StorageResult<()> {
+    conn.execute(
+        "
+        INSERT INTO review_session_items
+            (id, session_id, card_id, question, rating, response_time_ms, answered_at, position)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+        ",
+        params![
+            item.id.to_string(),
+            session_id.to_string(),
+            item.card_id.to_string(),
+            item.question,
+            rating_to_str(item.rating),
+            item.response_time_ms,
+            item.answered_at.to_rfc3339(),
+            position as i64,
+        ],
+    )?;
+    Ok(())
+}
+
+fn review_session_from_row(
+    row: StoredReviewSessionRow,
+    items: Vec<ReviewSessionItem>,
+) -> StorageResult<ReviewSession> {
+    Ok(ReviewSession {
+        id: Uuid::parse_str(&row.id)?,
+        workspace_id: Uuid::parse_str(&row.workspace_id)?,
+        kind: review_session_kind_from_str(&row.kind),
+        scope_label: row.scope_label,
+        started_at: parse_datetime(&row.started_at)?,
+        completed_at: row
+            .completed_at
+            .as_deref()
+            .map(parse_datetime)
+            .transpose()?,
+        items,
+    })
+}
+
 fn doc_block_kind_to_str(kind: DocBlockKind) -> &'static str {
     match kind {
         DocBlockKind::Heading => "heading",
@@ -1362,6 +1585,20 @@ fn rating_from_str(value: &str) -> Rating {
     }
 }
 
+fn review_session_kind_to_str(kind: ReviewSessionKind) -> &'static str {
+    match kind {
+        ReviewSessionKind::Review => "review",
+        ReviewSessionKind::Practice => "practice",
+    }
+}
+
+fn review_session_kind_from_str(value: &str) -> ReviewSessionKind {
+    match value {
+        "practice" => ReviewSessionKind::Practice,
+        _ => ReviewSessionKind::Review,
+    }
+}
+
 struct StoredCardRow {
     id: String,
     block_id: String,
@@ -1402,6 +1639,25 @@ struct StoredDocBlockRow {
     kind: String,
     content: String,
     checked: bool,
+    position: i64,
+}
+
+struct StoredReviewSessionRow {
+    id: String,
+    workspace_id: String,
+    kind: String,
+    scope_label: String,
+    started_at: String,
+    completed_at: Option<String>,
+}
+
+struct StoredReviewSessionItemRow {
+    id: String,
+    card_id: String,
+    question: String,
+    rating: String,
+    response_time_ms: Option<u32>,
+    answered_at: String,
     position: i64,
 }
 
@@ -1540,6 +1796,66 @@ mod tests {
 
         assert_eq!(events.len(), 1);
         assert_eq!(cards[0].srs.reps, 1);
+    }
+
+    #[test]
+    fn saves_and_loads_review_sessions_with_items() {
+        let page = import_single_markdown_page(
+            "Programming",
+            "- What is Rust? #card\n  sgd-deck:: Programming\n  sgd-topic:: Rust\n  - A language.",
+        );
+        let workspace = Workspace {
+            id: Uuid::new_v4(),
+            name: "Sessions".to_string(),
+            pages: vec![page],
+        };
+        let db_path = std::env::temp_dir().join(format!(
+            "studygraph-session-test-{}.sqlite3",
+            Uuid::new_v4()
+        ));
+        let card_id = {
+            let mut storage = StudyGraphStorage::open(&db_path).unwrap();
+            storage.save_workspace(&workspace).unwrap();
+            storage.load_cards(workspace.id).unwrap().remove(0).id
+        };
+        let started_at = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let answered_at = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 8).unwrap();
+        let session = ReviewSession {
+            id: Uuid::new_v4(),
+            workspace_id: workspace.id,
+            kind: ReviewSessionKind::Review,
+            scope_label: "All due cards".to_string(),
+            started_at,
+            completed_at: Some(answered_at),
+            items: vec![ReviewSessionItem {
+                id: Uuid::new_v4(),
+                session_id: Uuid::nil(),
+                card_id,
+                question: "What is Rust?".to_string(),
+                rating: Rating::Good,
+                response_time_ms: Some(8_000),
+                answered_at,
+                position: 99,
+            }],
+        };
+
+        {
+            let storage = StudyGraphStorage::open(&db_path).unwrap();
+            storage.save_review_session(&session).unwrap();
+        }
+        let storage = StudyGraphStorage::open(&db_path).unwrap();
+        let loaded = storage.load_review_session(session.id).unwrap().unwrap();
+        let recent = storage.load_review_sessions(workspace.id, 20).unwrap();
+        std::fs::remove_file(&db_path).ok();
+
+        assert_eq!(loaded.kind, ReviewSessionKind::Review);
+        assert_eq!(loaded.scope_label, "All due cards");
+        assert_eq!(loaded.items.len(), 1);
+        assert_eq!(loaded.items[0].session_id, session.id);
+        assert_eq!(loaded.items[0].position, 0);
+        assert_eq!(loaded.items[0].response_time_ms, Some(8_000));
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].id, session.id);
     }
 
     #[test]

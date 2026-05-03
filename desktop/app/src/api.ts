@@ -13,6 +13,7 @@ import type {
   FolderImportResult,
   GeneratedCard,
   Rating,
+  ReviewSession,
   WorkspaceExport,
 } from "./types";
 
@@ -120,6 +121,14 @@ export async function reviewCard(cardId: string, rating: Rating, responseTimeMs?
     rating,
     responseTimeMs,
   });
+}
+
+export async function loadReviewSessions(): Promise<ReviewSession[]> {
+  return invoke<ReviewSession[]>("load_review_sessions");
+}
+
+export async function saveReviewSession(session: ReviewSession): Promise<ReviewSession[]> {
+  return invoke<ReviewSession[]>("save_review_session", { session });
 }
 
 export async function createPage(name: string): Promise<DesktopSnapshot> {
