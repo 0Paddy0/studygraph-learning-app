@@ -99,6 +99,13 @@ interface TodoItem {
   cardCount?: number;
 }
 
+interface SessionAnswerStat {
+  cardId: string;
+  question: string;
+  rating: Rating;
+  responseTimeMs?: number;
+}
+
 const sampleImport = `# Ungarisch Mini
 sgd-deck:: Ungarisch Deutsch
 
@@ -124,6 +131,7 @@ export function App() {
   const [showAnswer, setShowAnswer] = useState(false);
   const [reviewStartedAt, setReviewStartedAt] = useState(() => Date.now());
   const [reviewResponseTimeMs, setReviewResponseTimeMs] = useState<number | undefined>();
+  const [reviewSessionStats, setReviewSessionStats] = useState<SessionAnswerStat[]>([]);
   const [practiceMode, setPracticeMode] = useState<PracticeMode>("all");
   const [practiceDeckSlug, setPracticeDeckSlug] = useState<string>("");
   const [practiceNodeId, setPracticeNodeId] = useState<string>("");
@@ -132,6 +140,7 @@ export function App() {
   const [practiceShowAnswer, setPracticeShowAnswer] = useState(false);
   const [practiceStartedAt, setPracticeStartedAt] = useState(() => Date.now());
   const [practiceResponseTimeMs, setPracticeResponseTimeMs] = useState<number | undefined>();
+  const [practiceSessionStats, setPracticeSessionStats] = useState<SessionAnswerStat[]>([]);
   const [practiceRecordRatings, setPracticeRecordRatings] = useState(false);
   const [selectedNode, setSelectedNode] = useState<StudyGraphNode | null>(null);
   const [pageName, setPageName] = useState("Imported Page");
@@ -397,6 +406,12 @@ export function App() {
     setError(null);
     try {
       const next = await reviewCard(card.id, rating, reviewResponseTimeMs);
+      setReviewSessionStats((current) => [...current, {
+        cardId: card.id,
+        question: card.question,
+        rating,
+        responseTimeMs: reviewResponseTimeMs,
+      }]);
       setSnapshot(next);
       setShowAnswer(false);
       setReviewResponseTimeMs(undefined);
@@ -421,6 +436,12 @@ export function App() {
     setError(null);
     try {
       const next = await reviewCard(card.id, rating, practiceResponseTimeMs);
+      setPracticeSessionStats((current) => [...current, {
+        cardId: card.id,
+        question: card.question,
+        rating,
+        responseTimeMs: practiceResponseTimeMs,
+      }]);
       setSnapshot(next);
       setPracticeShowAnswer(false);
       setPracticeResponseTimeMs(undefined);
@@ -1183,6 +1204,8 @@ export function App() {
             total={dueCards.length}
             scopeLabel={reviewScopeLabel}
             showAnswer={showAnswer}
+            responseTimeMs={reviewResponseTimeMs}
+            sessionStats={reviewSessionStats}
             onShowAnswer={revealReviewAnswer}
             onSkip={() => {
               setShowAnswer(false);
@@ -1204,6 +1227,8 @@ export function App() {
             deckSlug={practiceDeckSlug}
             graphNodeLabel={practiceMode === "graph" ? practiceScopeLabel : ""}
             showAnswer={practiceShowAnswer}
+            responseTimeMs={practiceResponseTimeMs}
+            sessionStats={practiceSessionStats}
             recordRatings={practiceRecordRatings}
             onModeChange={(mode) => {
               setPracticeMode(mode);
@@ -2518,12 +2543,51 @@ function CardStudyMeta({ card }: { card: StudyCard }) {
   );
 }
 
+function SessionStatsPanel({
+  stats,
+  currentResponseTimeMs,
+}: {
+  stats: SessionAnswerStat[];
+  currentResponseTimeMs?: number;
+}) {
+  const answered = stats.length;
+  const timedStats = stats.filter((stat) => typeof stat.responseTimeMs === "number");
+  const averageMs = timedStats.length > 0
+    ? timedStats.reduce((sum, stat) => sum + (stat.responseTimeMs ?? 0), 0) / timedStats.length
+    : undefined;
+  const counts = stats.reduce<Record<Rating, number>>((acc, stat) => {
+    acc[stat.rating] += 1;
+    return acc;
+  }, { again: 0, hard: 0, good: 0, easy: 0 });
+  const slowest = [...timedStats]
+    .sort((left, right) => (right.responseTimeMs ?? 0) - (left.responseTimeMs ?? 0))
+    .slice(0, 3);
+
+  if (answered === 0 && currentResponseTimeMs === undefined) {
+    return null;
+  }
+
+  return (
+    <aside className="study-session-summary">
+      <span>Answered: {answered}</span>
+      {currentResponseTimeMs !== undefined && <span>Current answer time: {formatDurationMs(currentResponseTimeMs)}</span>}
+      {averageMs !== undefined && <span>Ø answer time: {formatDurationMs(averageMs)}</span>}
+      <span>Again {counts.again} · Hard {counts.hard} · Good {counts.good} · Easy {counts.easy}</span>
+      {slowest.length > 0 && (
+        <span>Slowest: {slowest.map((stat) => `${shorten(stat.question, 28)} (${formatDurationMs(stat.responseTimeMs ?? 0)})`).join(" · ")}</span>
+      )}
+    </aside>
+  );
+}
+
 function ReviewView({
   card,
   index,
   total,
   scopeLabel,
   showAnswer,
+  responseTimeMs,
+  sessionStats,
   onShowAnswer,
   onSkip,
   onRate,
@@ -2534,6 +2598,8 @@ function ReviewView({
   total: number;
   scopeLabel: string;
   showAnswer: boolean;
+  responseTimeMs?: number;
+  sessionStats: SessionAnswerStat[];
   onShowAnswer: () => void;
   onSkip: () => void;
   onRate: (rating: Rating) => void;
@@ -2592,6 +2658,7 @@ function ReviewView({
           <span style={{ width: `${progress}%` }} />
         </div>
       </div>
+      <SessionStatsPanel stats={sessionStats} currentResponseTimeMs={showAnswer ? responseTimeMs : undefined} />
       <article className="review-card">
         <h2>{card.question}</h2>
         <CardStudyMeta card={card} />
@@ -2634,6 +2701,8 @@ function FreePracticeView({
   deckSlug,
   graphNodeLabel,
   showAnswer,
+  responseTimeMs,
+  sessionStats,
   recordRatings,
   onModeChange,
   onDeckChange,
@@ -2652,6 +2721,8 @@ function FreePracticeView({
   deckSlug: string;
   graphNodeLabel: string;
   showAnswer: boolean;
+  responseTimeMs?: number;
+  sessionStats: SessionAnswerStat[];
   recordRatings: boolean;
   onModeChange: (mode: PracticeMode) => void;
   onDeckChange: (deckSlug: string) => void;
@@ -2742,6 +2813,7 @@ function FreePracticeView({
         <span>{cards.length} cards indexed</span>
         {!recordRatings && <strong>Practice-only: SRS unchanged</strong>}
       </div>
+      {recordRatings && <SessionStatsPanel stats={sessionStats} currentResponseTimeMs={showAnswer ? responseTimeMs : undefined} />}
 
       {!card ? (
         <section className="empty">No cards match this practice filter.</section>
@@ -3677,6 +3749,11 @@ function filterDocPages(pages: DocPage[], query: string) {
     ].join(" ").toLowerCase();
     return haystack.includes(needle);
   });
+}
+
+function formatDurationMs(value: number) {
+  if (!Number.isFinite(value)) return "0.0s";
+  return `${(value / 1000).toFixed(1)}s`;
 }
 
 function formatShortDateTime(value: string) {
