@@ -63,6 +63,7 @@ import type {
 
 type Screen = "notes" | "doc" | "todo" | "dashboard" | "review" | "practice" | "graph" | "generate" | "settings" | "import" | "export";
 type PracticeMode = "all" | "deck" | "weak" | "new" | "graph";
+type StudyMode = "classic" | "cloze";
 type MaybePromise<T = void> = T | Promise<T>;
 type TodoStatus = "open" | "doing" | "done";
 
@@ -129,6 +130,7 @@ export function App() {
   const [reviewNodeId, setReviewNodeId] = useState<string | null>(null);
   const [reviewScopeLabel, setReviewScopeLabel] = useState("All due cards");
   const [showAnswer, setShowAnswer] = useState(false);
+  const [studyMode, setStudyMode] = useState<StudyMode>("classic");
   const [reviewStartedAt, setReviewStartedAt] = useState(() => Date.now());
   const [reviewResponseTimeMs, setReviewResponseTimeMs] = useState<number | undefined>();
   const [reviewSessionStats, setReviewSessionStats] = useState<SessionAnswerStat[]>([]);
@@ -138,6 +140,7 @@ export function App() {
   const [practiceScopeLabel, setPracticeScopeLabel] = useState("All cards");
   const [practiceIndex, setPracticeIndex] = useState(0);
   const [practiceShowAnswer, setPracticeShowAnswer] = useState(false);
+  const [practiceStudyMode, setPracticeStudyMode] = useState<StudyMode>("classic");
   const [practiceStartedAt, setPracticeStartedAt] = useState(() => Date.now());
   const [practiceResponseTimeMs, setPracticeResponseTimeMs] = useState<number | undefined>();
   const [practiceSessionStats, setPracticeSessionStats] = useState<SessionAnswerStat[]>([]);
@@ -860,6 +863,15 @@ export function App() {
     setScreen("notes");
   }
 
+
+  function openTodoItem(item: TodoItem) {
+    if (item.scope === "topic") {
+      startPractice("graph", "", item.id, `${item.deck ?? "Deck"} / ${item.topic ?? "Topic"}`);
+      return;
+    }
+    openBlock(item.pageId, item.block.id);
+  }
+
   function openCardSource(card: StudyCard) {
     const location = blockLocations.get(card.block_id);
     if (location) {
@@ -1172,7 +1184,7 @@ export function App() {
             onTargetPageChange={setTodoTargetPageId}
             onCreate={(content, pageId) => void createTodoFromQuickCapture(content, pageId)}
             onSetStatus={(item, status) => void updateTodoItemStatus(item, status)}
-            onOpenBlock={openBlock}
+            onOpenBlock={openTodoItem}
           />
         )}
         {screen === "dashboard" && (
@@ -1204,6 +1216,8 @@ export function App() {
             total={dueCards.length}
             scopeLabel={reviewScopeLabel}
             showAnswer={showAnswer}
+            studyMode={studyMode}
+            onStudyModeChange={setStudyMode}
             responseTimeMs={reviewResponseTimeMs}
             sessionStats={reviewSessionStats}
             onShowAnswer={revealReviewAnswer}
@@ -1227,6 +1241,8 @@ export function App() {
             deckSlug={practiceDeckSlug}
             graphNodeLabel={practiceMode === "graph" ? practiceScopeLabel : ""}
             showAnswer={practiceShowAnswer}
+            studyMode={practiceStudyMode}
+            onStudyModeChange={setPracticeStudyMode}
             responseTimeMs={practiceResponseTimeMs}
             sessionStats={practiceSessionStats}
             recordRatings={practiceRecordRatings}
@@ -2403,7 +2419,7 @@ function TodoView({
   onTargetPageChange: (pageId: string) => void;
   onCreate: (content: string, pageId: string) => void;
   onSetStatus: (item: TodoItem, status: TodoStatus) => void;
-  onOpenBlock: (pageId: string, blockId: string) => void;
+  onOpenBlock: (item: TodoItem) => void;
 }) {
   const [filter, setFilter] = useState("");
   const filteredItems = useMemo(() => filterTodoItems(items, filter), [items, filter]);
@@ -2465,7 +2481,7 @@ function TodoColumn({
   title: string;
   items: TodoItem[];
   onSetStatus: (item: TodoItem, status: TodoStatus) => void;
-  onOpenBlock: (pageId: string, blockId: string) => void;
+  onOpenBlock: (item: TodoItem) => void;
 }) {
   return (
     <section className="todo-column">
@@ -2478,7 +2494,7 @@ function TodoColumn({
       ) : (
         items.map((item) => (
           <article className={`todo-item ${item.status}`} key={item.id}>
-            <button className="todo-title" onClick={() => onOpenBlock(item.pageId, item.block.id)}>
+            <button className="todo-title" onClick={() => onOpenBlock(item)}>
               {todoItemTitle(item)}
             </button>
             <small>{todoItemSubtitle(item)}</small>
@@ -2543,6 +2559,52 @@ function CardStudyMeta({ card }: { card: StudyCard }) {
   );
 }
 
+function StudyModeToggle({ mode, onChange }: { mode: StudyMode; onChange: (mode: StudyMode) => void }) {
+  return (
+    <div className="study-mode-toggle">
+      <span>Study mode</span>
+      <button className={mode === "classic" ? "active" : ""} onClick={() => onChange("classic")}>Classic Q/A</button>
+      <button className={mode === "cloze" ? "active" : ""} onClick={() => onChange("cloze")}>AI Cloze blanks</button>
+    </div>
+  );
+}
+
+function ClozeAnswer({ card }: { card: StudyCard }) {
+  const cloze = useMemo(() => buildClozePrompt(card), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
+  const [answers, setAnswers] = useState<string[]>(() => cloze.blanks.map(() => ""));
+
+  useEffect(() => {
+    setAnswers(cloze.blanks.map(() => ""));
+  }, [cloze.text]);
+
+  return (
+    <article className="answer-card cloze-card">
+      <h3>AI Cloze Answer</h3>
+      <p className="cloze-hint">Fill the blacked-out key words. More words are hidden as the card gets stronger.</p>
+      <div className="cloze-text">
+        {cloze.parts.map((part, index) => (
+          part.kind === "text" ? (
+            <span key={index}>{part.value}</span>
+          ) : (
+            <input
+              key={index}
+              aria-label={`Hidden word ${part.blankIndex + 1}`}
+              value={answers[part.blankIndex] ?? ""}
+              placeholder="█"
+              onChange={(event) => setAnswers((current) => current.map((value, answerIndex) => answerIndex === part.blankIndex ? event.target.value : value))}
+              className={normalizeAnswer(answers[part.blankIndex] ?? "") === normalizeAnswer(cloze.blanks[part.blankIndex]) ? "correct" : ""}
+            />
+          )
+        ))}
+      </div>
+      <details>
+        <summary>Show original answer</summary>
+        <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
+      </details>
+    </article>
+  );
+}
+
 function SessionStatsPanel({
   stats,
   currentResponseTimeMs,
@@ -2586,6 +2648,8 @@ function ReviewView({
   total,
   scopeLabel,
   showAnswer,
+  studyMode,
+  onStudyModeChange,
   responseTimeMs,
   sessionStats,
   onShowAnswer,
@@ -2598,6 +2662,8 @@ function ReviewView({
   total: number;
   scopeLabel: string;
   showAnswer: boolean;
+  studyMode: StudyMode;
+  onStudyModeChange: (mode: StudyMode) => void;
   responseTimeMs?: number;
   sessionStats: SessionAnswerStat[];
   onShowAnswer: () => void;
@@ -2658,6 +2724,7 @@ function ReviewView({
           <span style={{ width: `${progress}%` }} />
         </div>
       </div>
+      <StudyModeToggle mode={studyMode} onChange={onStudyModeChange} />
       <SessionStatsPanel stats={sessionStats} currentResponseTimeMs={showAnswer ? responseTimeMs : undefined} />
       <article className="review-card">
         <h2>{card.question}</h2>
@@ -2665,10 +2732,14 @@ function ReviewView({
         {card.linked_pages.length > 0 && <p>Linked: {card.linked_pages.join(", ")}</p>}
       </article>
       {showAnswer && (
-        <article className="answer-card">
-          <h3>Answer</h3>
-          <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
-        </article>
+        studyMode === "cloze" ? (
+          <ClozeAnswer card={card} />
+        ) : (
+          <article className="answer-card">
+            <h3>Answer</h3>
+            <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
+          </article>
+        )
       )}
       <div className="button-row">
         {!showAnswer ? (
@@ -2701,6 +2772,8 @@ function FreePracticeView({
   deckSlug,
   graphNodeLabel,
   showAnswer,
+  studyMode,
+  onStudyModeChange,
   responseTimeMs,
   sessionStats,
   recordRatings,
@@ -2721,6 +2794,8 @@ function FreePracticeView({
   deckSlug: string;
   graphNodeLabel: string;
   showAnswer: boolean;
+  studyMode: StudyMode;
+  onStudyModeChange: (mode: StudyMode) => void;
   responseTimeMs?: number;
   sessionStats: SessionAnswerStat[];
   recordRatings: boolean;
@@ -2807,6 +2882,8 @@ function FreePracticeView({
         </label>
       </div>
 
+      <StudyModeToggle mode={studyMode} onChange={onStudyModeChange} />
+
       <div className="practice-summary">
         <span>{total} cards in queue</span>
         <span>{selectedDeckLabel}</span>
@@ -2831,10 +2908,14 @@ function FreePracticeView({
             {card.linked_pages.length > 0 && <p>Linked: {card.linked_pages.join(", ")}</p>}
           </article>
           {showAnswer && (
-            <article className="answer-card">
-              <h3>Answer</h3>
-              <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
-            </article>
+            studyMode === "cloze" ? (
+              <ClozeAnswer card={card} />
+            ) : (
+              <article className="answer-card">
+                <h3>Answer</h3>
+                <pre>{card.answer_markdown || "(No answer child blocks)"}</pre>
+              </article>
+            )
           )}
           <div className="button-row">
             {!showAnswer ? (
@@ -2890,7 +2971,8 @@ function GraphView({
 
   return (
     <section className="graph-layout">
-      <svg className="graph" viewBox="0 0 980 620">
+      <div className="graph-scroll">
+        <svg className="graph" viewBox="0 0 980 620">
         {snapshot.graph.edges.map((edge) => {
           const source = byId.get(edge.source);
           const target = byId.get(edge.target);
@@ -2903,7 +2985,8 @@ function GraphView({
             <text y={32}>{shorten(node.label, 28)}</text>
           </g>
         ))}
-      </svg>
+        </svg>
+      </div>
       <aside className="details">
         {selectedNode ? (
           <>
@@ -3750,6 +3833,41 @@ function filterDocPages(pages: DocPage[], query: string) {
     return haystack.includes(needle);
   });
 }
+
+function buildClozePrompt(card: StudyCard) {
+  const text = card.answer_markdown || "(No answer child blocks)";
+  const words = Array.from(text.matchAll(/[\p{L}\p{N}][\p{L}\p{N}-]{3,}/gu));
+  const unique = new Set<string>();
+  const candidates = words
+    .map((match) => ({ value: match[0], index: match.index ?? 0 }))
+    .filter((word) => {
+      const normalized = normalizeAnswer(word.value);
+      if (unique.has(normalized) || commonClozeWords.has(normalized)) return false;
+      unique.add(normalized);
+      return true;
+    })
+    .sort((left, right) => right.value.length - left.value.length);
+  const strength = Math.max(card.srs.reps, Math.round(card.srs.ease));
+  const blankCount = Math.min(Math.max(1, Math.floor(strength / 2)), 6, candidates.length);
+  const selected = candidates.slice(0, blankCount).sort((left, right) => left.index - right.index);
+  const parts: Array<{ kind: "text"; value: string } | { kind: "blank"; blankIndex: number }> = [];
+  const blanks: string[] = [];
+  let cursor = 0;
+  for (const blank of selected) {
+    parts.push({ kind: "text", value: text.slice(cursor, blank.index) });
+    parts.push({ kind: "blank", blankIndex: blanks.length });
+    blanks.push(blank.value);
+    cursor = blank.index + blank.value.length;
+  }
+  parts.push({ kind: "text", value: text.slice(cursor) });
+  return { text, parts, blanks };
+}
+
+function normalizeAnswer(value: string) {
+  return value.trim().toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+}
+
+const commonClozeWords = new Set(["this", "that", "with", "from", "have", "will", "eine", "einer", "einen", "einem", "oder", "aber", "auch", "dass", "nicht", "werden", "kann", "sind", "the", "and", "for", "into"]);
 
 function formatDurationMs(value: number) {
   if (!Number.isFinite(value)) return "0.0s";

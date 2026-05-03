@@ -1233,14 +1233,21 @@ label {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 280px;
   gap: 14px;
+  min-height: 0;
+}
+
+.graph-scroll {
+  overflow: auto;
+  max-height: calc(100vh - 180px);
+  border: 1px solid rgba(178, 211, 210, 0.16);
+  border-radius: 8px;
+  background: #073942;
 }
 
 .graph {
-  width: 100%;
+  width: max(100%, 980px);
   min-height: 620px;
-  background: #073942;
-  border: 1px solid rgba(178, 211, 210, 0.16);
-  border-radius: 8px;
+  display: block;
 }
 
 .edge {
@@ -1629,4 +1636,44 @@ label {
   border-radius: 999px;
   padding: 5px 9px;
   background: rgba(107, 179, 182, 0.08);
+}
+
+
+.study-mode-toggle {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+  color: #8eb0af;
+}
+
+.study-mode-toggle button.active {
+  border-color: #6bb3b6;
+  background: rgba(107, 179, 182, 0.18);
+}
+
+.cloze-card .cloze-hint {
+  color: #8eb0af;
+  margin-top: 0;
+}
+
+.cloze-text {
+  line-height: 2.3;
+  white-space: pre-wrap;
+}
+
+.cloze-text input {
+  width: 120px;
+  margin: 0 4px;
+  padding: 4px 7px;
+  background: #020f12;
+  color: #f4f1e8;
+  border: 1px solid rgba(244, 241, 232, 0.24);
+  border-radius: 6px;
+}
+
+.cloze-text input.correct {
+  border-color: #78c679;
+  background: rgba(120, 198, 121, 0.12);
 }
