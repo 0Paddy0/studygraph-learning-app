@@ -218,6 +218,15 @@ sgd-deck:: Ungarisch Deutsch
   - Aussprache: koe-soe-noem
 `;
 
+function errorMessage(error: unknown) {
+  if (error instanceof Error) return error.message;
+  return String(error);
+}
+
+function statusError(context: string, error: unknown) {
+  return `${context}: ${errorMessage(error)}`;
+}
+
 export function App() {
   const [snapshot, setSnapshot] = useState<DesktopSnapshot | null>(null);
   const [screen, setScreen] = useState<Screen>("dashboard");
@@ -339,7 +348,7 @@ export function App() {
       setLastRefreshAt(new Date().toISOString());
       void refreshDebugInfo();
     } catch (loadError) {
-      setError(loadError instanceof Error ? loadError.message : String(loadError));
+      setError(statusError("Storage load failed", loadError));
     } finally {
       setLoading(false);
     }
@@ -352,7 +361,7 @@ export function App() {
       setDebugInfo(info);
       setDebugStatus("Debug info refreshed.");
     } catch (debugError) {
-      setDebugStatus(debugError instanceof Error ? debugError.message : String(debugError));
+      setDebugStatus(statusError("Storage debug info unavailable", debugError));
     }
   }
 
@@ -370,7 +379,7 @@ export function App() {
       setSettingsStatus("Settings loaded from SQLite.");
     } catch (settingsError) {
       setSettingsStatus(
-        `Using local settings fallback: ${settingsError instanceof Error ? settingsError.message : String(settingsError)}`,
+        statusError("Using local settings fallback; SQLite settings load failed", settingsError),
       );
     }
   }
@@ -393,7 +402,7 @@ export function App() {
       setSettingsStatus("Settings saved to SQLite.");
     } catch (settingsError) {
       setSettingsStatus(
-        `Saved local fallback only: ${settingsError instanceof Error ? settingsError.message : String(settingsError)}`,
+        statusError("Saved local fallback only; SQLite settings save failed", settingsError),
       );
     }
   }
@@ -406,7 +415,7 @@ export function App() {
       setSelectedDocPageId((current) => current ?? pages[0]?.id ?? null);
       setDocStatus("Docs loaded.");
     } catch (docError) {
-      setDocStatus(docError instanceof Error ? docError.message : String(docError));
+      setDocStatus(statusError("Doc storage load failed", docError));
     }
   }
 
@@ -471,24 +480,30 @@ export function App() {
 
   async function importPage() {
     setError(null);
-    setFileStatus(null);
+    setFileStatus("Importing pasted Markdown into SQLite...");
     try {
       const next = await importMarkdownPage(pageName, markdown);
       setSnapshot(next);
       setSelectedPageId(next.workspace.pages.at(-1)?.id ?? next.workspace.pages[0]?.id ?? null);
       setFocusedBlockId(null);
+      setFileStatus(`Imported pasted Markdown as ${pageName.trim() || "Imported Page"}.`);
       setScreen("dashboard");
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : String(importError));
+      setError(statusError("Markdown text import failed", importError));
+      setFileStatus(null);
     }
   }
 
   async function importFile() {
     setError(null);
-    setFileStatus(null);
+    setFileStatus("Choose a Markdown file to import...");
     try {
       const filePath = await pickMarkdownFile();
-      if (!filePath) return;
+      if (!filePath) {
+        setFileStatus("Import cancelled; no file selected.");
+        return;
+      }
+      setFileStatus(`Importing ${filePath}...`);
       const next = await importMarkdownFile(filePath);
       const importedPageName = pageNameFromFilePath(filePath);
       const importedPage = next.workspace.pages.find((page) => page.name === importedPageName);
@@ -498,20 +513,28 @@ export function App() {
       setFileStatus(`Imported ${filePath}`);
       setScreen("notes");
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : String(importError));
+      setError(statusError("Markdown file import failed", importError));
+      setFileStatus(null);
     }
   }
 
   async function importFolder() {
     setError(null);
-    setFileStatus(null);
+    setFileStatus("Choose a Markdown folder to import...");
     try {
       const folderPath = await pickMarkdownFolder();
-      if (!folderPath) return;
+      if (!folderPath) {
+        setFileStatus("Import cancelled; no folder selected.");
+        return;
+      }
       const confirmed = window.confirm(
         "Import all Markdown files from this folder recursively? Pages with matching names will be replaced.",
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        setFileStatus("Import cancelled before reading files.");
+        return;
+      }
+      setFileStatus(`Importing Markdown folder ${folderPath}...`);
       const result = await importMarkdownFolder(folderPath);
       setSnapshot(result.snapshot);
       setSelectedPageId(result.snapshot.workspace.pages[0]?.id ?? null);
@@ -519,7 +542,8 @@ export function App() {
       setFileStatus(`Imported ${result.imported_files.length} Markdown files from ${result.folder_path}`);
       setScreen("dashboard");
     } catch (importError) {
-      setError(importError instanceof Error ? importError.message : String(importError));
+      setError(statusError("Markdown folder import failed", importError));
+      setFileStatus(null);
     }
   }
 
@@ -786,31 +810,42 @@ export function App() {
 
   async function loadExport() {
     setError(null);
+    setFileStatus("Preparing Markdown export and JSON backup preview...");
     try {
       const [result, backup] = await Promise.all([exportWorkspaceMarkdown(), exportAppBackup()]);
       setExportedPages(result.pages);
       setBackupPreview(backup);
+      setFileStatus(`Prepared ${result.pages.length} Markdown pages and JSON backup preview.`);
       setScreen("export");
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : String(exportError));
+      setError(statusError("Export preview failed", exportError));
+      setFileStatus(null);
     }
   }
 
   async function exportToFolder() {
     setError(null);
-    setFileStatus(null);
+    setFileStatus("Choose an export folder...");
     try {
       const folderPath = await pickExportFolder();
-      if (!folderPath) return;
+      if (!folderPath) {
+        setFileStatus("Export cancelled; no folder selected.");
+        return;
+      }
       const overwrite = window.confirm(
         "Export all pages as Markdown into this folder? Existing .md files with matching page names can be overwritten.",
       );
-      if (!overwrite) return;
+      if (!overwrite) {
+        setFileStatus("Export cancelled before writing files.");
+        return;
+      }
+      setFileStatus(`Exporting Markdown files to ${folderPath}...`);
       const result = await exportWorkspaceMarkdownToFolder(folderPath, true);
-      setFileStatus(`Exported ${result.files.length} Markdown files to ${result.folder_path}`);
       await loadExport();
+      setFileStatus(`Exported ${result.files.length} Markdown files to ${result.folder_path}`);
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : String(exportError));
+      setError(statusError("Markdown folder export failed", exportError));
+      setFileStatus(null);
     }
   }
 
@@ -821,35 +856,47 @@ export function App() {
       setBackupPreview(result);
       setScreen("export");
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : String(exportError));
+      setError(statusError("JSON backup preview failed", exportError));
     }
   }
 
   async function exportBackupToFolder() {
     setError(null);
-    setFileStatus(null);
+    setFileStatus("Choose a folder for studygraph-backup.json...");
     try {
       const folderPath = await pickExportFolder();
-      if (!folderPath) return;
+      if (!folderPath) {
+        setFileStatus("Backup export cancelled; no folder selected.");
+        return;
+      }
+      setFileStatus(`Writing JSON backup to ${folderPath}...`);
       const result = await exportAppBackupToFolder(folderPath);
       setBackupPreview(result.backup);
       setFileStatus(`Exported JSON backup to ${result.file_path}`);
       setScreen("export");
     } catch (exportError) {
-      setError(exportError instanceof Error ? exportError.message : String(exportError));
+      setError(statusError("JSON backup export failed", exportError));
+      setFileStatus(null);
     }
   }
 
   async function restoreBackupFromFile() {
     setError(null);
-    setFileStatus(null);
+    setFileStatus("Choose a StudyGraph JSON backup to restore...");
     try {
       const filePath = await pickBackupFile();
-      if (!filePath) return;
+      if (!filePath) {
+        setFileStatus("Restore cancelled; no backup file selected.");
+        return;
+      }
       const confirmed = window.confirm(
         "Restore this StudyGraph backup? This replaces the current workspace data with the backup contents.",
       );
-      if (!confirmed) return;
+      if (!confirmed) {
+        setFileStatus("Restore cancelled before replacing workspace data.");
+        return;
+      }
+      setFileStatus(`Restoring StudyGraph backup from ${filePath}...`);
       const result = await restoreAppBackupFromFile(filePath);
       setSnapshot(result.snapshot);
       setSelectedPageId(result.snapshot.workspace.pages[0]?.id ?? null);
@@ -858,12 +905,20 @@ export function App() {
       setFileStatus(`Restored backup from ${result.file_path}`);
       setScreen("export");
     } catch (restoreError) {
-      setError(restoreError instanceof Error ? restoreError.message : String(restoreError));
+      setError(statusError("JSON backup restore failed", restoreError));
+      setFileStatus(null);
     }
   }
 
   function generateCardsPreview() {
     setError(null);
+    setGeneratorStatus("Running local AI preview pipeline...");
+    if (!generatorInput.source_text.trim()) {
+      setGeneratedCards([]);
+      setGeneratorIssues([]);
+      setGeneratorStatus("Add source text first. The current AI pipeline is local-only and makes no external API request.");
+      return;
+    }
     const provider = createConfiguredAiProvider(settings);
     const response = provider.generateCards({ input: generatorInput, existingCards: cards });
     setGeneratedCards(response.cards);
@@ -912,7 +967,7 @@ export function App() {
       setScreen("notes");
       setGeneratorStatus(`Inserted ${generatedCards.length} cards into ${selectedPage.name}.`);
     } catch (insertError) {
-      setError(insertError instanceof Error ? insertError.message : String(insertError));
+      setGeneratorStatus(statusError("Could not insert generated cards", insertError));
     }
   }
 
@@ -3741,6 +3796,8 @@ function GeneratorView({
   onInsert: () => void;
 }) {
   const markdownPreview = useMemo(() => formatGeneratedCardsAsMarkdown(cards), [cards]);
+  const sourceTextReady = input.source_text.trim().length > 0;
+  const externalAiStatus = "External API disabled";
 
   return (
     <section className="generate">
@@ -3755,6 +3812,15 @@ function GeneratorView({
 
         <aside className="privacy-note">
           External OpenAI/API settings are metadata-only in this build. Future provider hookup belongs in <code>aiPipeline.ts</code> and must pass explicit privacy/quality checks before requests are enabled.
+        </aside>
+
+        <aside className="readiness-card" aria-label="AI pipeline status">
+          <strong>AI readiness</strong>
+          <ul>
+            <li>Local heuristic provider: ready</li>
+            <li>Source text: {sourceTextReady ? "ready for preview" : "missing"}</li>
+            <li>{externalAiStatus}; no paid API call is made from this UI.</li>
+          </ul>
         </aside>
 
         <div className="generator-grid">
@@ -3923,6 +3989,11 @@ function SettingsView({
     [snapshot],
   );
   const incompleteCards = snapshot?.cards.filter((card) => card.incomplete).length ?? 0;
+  const storageStatus = debugInfo?.database_path
+    ? `SQLite ready at ${debugInfo.database_path}`
+    : snapshot
+      ? "Workspace loaded; database path not reported yet."
+      : "Workspace not loaded yet.";
   const debugReport = useMemo(
     () => buildDebugReport({
       settings,
@@ -4092,6 +4163,23 @@ function SettingsView({
           <p className="settings-note">No OAuth flow, API-key validation, external request, or paid API call is performed. Use a system keychain or environment-based backend before enabling real requests.</p>
         </article>
       </div>
+
+      <article className="settings-panel">
+        <div className="settings-heading">
+          <h2>Storage & Smoke Test</h2>
+          <button onClick={onRefreshDebug}>Refresh Storage Info</button>
+        </div>
+        <p className="settings-note">{storageStatus}</p>
+        <dl className="debug-paths">
+          <dt>Required checks</dt>
+          <dd><code>cargo test -p studygraph_core</code>, <code>npm test</code>, <code>npm run build</code></dd>
+          <dt>Linux UI deps</dt>
+          <dd><code>libwebkit2gtk-4.1-dev</code>, <code>libjavascriptcoregtk-4.1-dev</code>, <code>libsoup-3.0-dev</code>, <code>libgtk-3-dev</code>, <code>libayatana-appindicator3-dev</code>, <code>librsvg2-dev</code></dd>
+          <dt>Smoke command</dt>
+          <dd><code>npm run smoke:tauri</code> or <code>RUN_TAURI_DEV=1 npm run smoke:tauri</code> for the interactive window.</dd>
+        </dl>
+        {debugStatus && <p className="status">{debugStatus}</p>}
+      </article>
 
       <article className="settings-panel">
         <div className="settings-heading">

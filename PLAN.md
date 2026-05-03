@@ -21,6 +21,34 @@ The app should keep the feel of Logseq and the current StudyGraph plugin:
 
 The app must not be a Logseq fork at first. It should import/export Logseq-compatible Markdown where possible, but own its data model and runtime.
 
+
+## Current Status: Block 10 Product Readiness
+
+The desktop MVP has moved from scaffold to prerelease hardening. The current product includes:
+
+- Rust core parser, scheduler/SRS, graph builder, SQLite storage, import/export, settings, docs, review sessions, and backup data.
+- Tauri + React desktop UI with Edit Desk, Doc, To Do, Decks, Review, Free Practice, Study Graph, Generate Cards, Settings/Debug, Import, and Export screens.
+- Single-file Markdown import, recursive Markdown folder import, Markdown folder export, and StudyGraph JSON backup export/restore.
+- Offline deterministic AI-style card generation and cloze answer UI. External API/OpenAI settings are metadata-only; no external request is made.
+- Storage/debug status messages, import/export progress/cancel/error messages, AI readiness messaging, and smoke-test guidance in the UI.
+
+Release gates for this block:
+
+- `cargo test -p studygraph_core`
+- `cd desktop/app && npm test`
+- `cd desktop/app && npm run build`
+- `cd desktop/app && npm run smoke:tauri` for toolchain/dependency/manual smoke guidance
+
+Known blockers before a public desktop release:
+
+- installers are not yet signed/notarized,
+- auto-update is not implemented,
+- UI smoke remains partly manual,
+- external AI provider calls are intentionally disabled,
+- mobile apps are planning-only.
+
+See `ROADMAP.md` for the release-readiness roadmap and checklist.
+
 ## 2. High-Level Architecture
 
 ```text
@@ -479,7 +507,7 @@ Acceptance:
 - Import Logseq Markdown folder - implemented for recursive `.md`/`.markdown` folder import
 - Import single Markdown file - implemented
 - Export workspace as Markdown folder - implemented
-- Export StudyGraph JSON
+- Export StudyGraph JSON - implemented as local backup export/restore
 
 Acceptance:
 
@@ -536,8 +564,10 @@ Rust core:
 
 Desktop:
 
-- component tests
-- Playwright for main flows
+- TypeScript unit tests for UI helpers and AI/study logic
+- `npm run build` TypeScript/Vite production build
+- `npm run smoke:tauri` for frontend tests, production build, Rust core tests, Linux dependency check, and manual UI checklist
+- Playwright or equivalent for main flows later
 - Tauri command integration tests where practical
 
 Mobile:

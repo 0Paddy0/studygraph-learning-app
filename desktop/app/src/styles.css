@@ -1525,6 +1525,7 @@ label {
 }
 
 .privacy-note,
+.readiness-card,
 .quality-list {
   border: 1px solid rgba(178, 211, 210, 0.14);
   background: rgba(4, 25, 31, 0.35);
@@ -1533,9 +1534,20 @@ label {
   padding: 10px 12px;
 }
 
-.privacy-note {
+.privacy-note,
+.readiness-card {
   margin: 0;
   line-height: 1.45;
+}
+
+.readiness-card {
+  display: grid;
+  gap: 6px;
+}
+
+.readiness-card ul {
+  margin: 0;
+  padding-left: 18px;
 }
 
 .quality-list {
