@@ -62,12 +62,14 @@ import type {
   ReviewSession,
   ReviewSessionKind,
   StudyCard,
+  StudyGraphEdge,
   StudyGraphNode,
   WorkspaceExport,
 } from "./types";
 
 type Screen = "notes" | "doc" | "todo" | "dashboard" | "review" | "practice" | "graph" | "generate" | "settings" | "import" | "export";
 type PracticeMode = "all" | "deck" | "weak" | "new" | "graph";
+type GraphStatusFilter = "all" | "due" | "overdue" | "weak" | "new";
 type StudyMode = "classic" | "cloze";
 type MaybePromise<T = void> = T | Promise<T>;
 type TodoStatus = "open" | "doing" | "done";
@@ -3189,78 +3191,213 @@ function GraphView({
   onOpenPageByName: (name: string) => void;
 }) {
   const [zoom, setZoom] = useState(1);
-  const layout = layoutGraph(snapshot.graph.nodes);
-  const byId = new Map(layout.map((node) => [node.id, node]));
+  const [statusFilter, setStatusFilter] = useState<GraphStatusFilter>("all");
+  const [deckFilter, setDeckFilter] = useState("all");
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const dragRef = useRef<{ x: number; y: number; left: number; top: number } | null>(null);
+  const decks = useMemo(() => groupCardsByDeck(snapshot.cards), [snapshot.cards]);
+  const graphData = useMemo(
+    () => filterGraphForView(snapshot, statusFilter, deckFilter),
+    [snapshot, statusFilter, deckFilter],
+  );
+  const layout = useMemo(() => layoutGraph(graphData.nodes, graphData.edges), [graphData]);
+  const byId = new Map(layout.nodes.map((node) => [node.id, node]));
+  const visibleNodeIds = new Set(graphData.nodes.map((node) => node.id));
   const selectedCards = selectedNode ? cardsForGraphNode(snapshot.cards, selectedNode.id) : [];
-  const selectedDueCount = selectedCards.filter(isDue).length;
+  const filteredSelectedCards = applyGraphCardFilters(selectedCards, statusFilter, deckFilter);
+  const detailCards = filteredSelectedCards.length > 0 || statusFilter !== "all" || deckFilter !== "all" ? filteredSelectedCards : selectedCards;
+  const selectedStats = summarizeCards(detailCards);
+  const selectedDueCount = detailCards.filter(isDue).length;
   const selectedCard = selectedNode?.kind === "card" ? selectedCards[0] : undefined;
+  const graphStats = summarizeCards(applyGraphCardFilters(snapshot.cards, statusFilter, deckFilter));
   const canOpenPage =
     selectedNode &&
     selectedNode.kind !== "card" &&
-    selectedNode.label !== "Weak Cards" &&
+    !isSystemGraphNode(selectedNode) &&
     !selectedNode.label.startsWith("#");
+
+  function fitToScreen() {
+    const container = scrollRef.current;
+    if (!container) return;
+    const nextZoom = clampZoom(Math.min(container.clientWidth / layout.size.width, container.clientHeight / layout.size.height) * 0.96);
+    setZoom(nextZoom);
+    requestAnimationFrame(() => {
+      container.scrollLeft = 0;
+      container.scrollTop = 0;
+    });
+  }
+
+  function resetView() {
+    setZoom(1);
+    requestAnimationFrame(() => {
+      const container = scrollRef.current;
+      if (!container) return;
+      container.scrollLeft = 0;
+      container.scrollTop = 0;
+    });
+  }
 
   return (
     <section className="graph-layout">
       <div className="graph-panel">
-        <div className="graph-controls">
-          <button onClick={() => setZoom((current) => Math.max(0.6, Number((current - 0.2).toFixed(1))))}>−</button>
-          <span>{Math.round(zoom * 100)}%</span>
-          <button onClick={() => setZoom((current) => Math.min(2.4, Number((current + 0.2).toFixed(1))))}>+</button>
-          <button onClick={() => setZoom(1)}>Reset</button>
+        <div className="graph-toolbar">
+          <div className="graph-filters">
+            <label>
+              Status
+              <select value={statusFilter} onChange={(event) => setStatusFilter(event.target.value as GraphStatusFilter)}>
+                <option value="all">All cards</option>
+                <option value="due">Due now</option>
+                <option value="overdue">Overdue review</option>
+                <option value="weak">Weak</option>
+                <option value="new">New</option>
+              </select>
+            </label>
+            <label>
+              Deck
+              <select value={deckFilter} onChange={(event) => setDeckFilter(event.target.value)}>
+                <option value="all">All decks</option>
+                {decks.map((deck) => (
+                  <option key={deck.deck_slug} value={deck.deck_slug}>{deck.deck}</option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div className="graph-controls">
+            <button onClick={() => setZoom((current) => clampZoom(current - 0.15))}>−</button>
+            <span>{Math.round(zoom * 100)}%</span>
+            <button onClick={() => setZoom((current) => clampZoom(current + 0.15))}>+</button>
+            <button onClick={fitToScreen}>Fit</button>
+            <button onClick={resetView}>Reset</button>
+          </div>
         </div>
-        <div className="graph-scroll">
-        <svg className="graph" style={{ width: `${980 * zoom}px`, minHeight: `${620 * zoom}px` }} viewBox="0 0 980 620">
-        {snapshot.graph.edges.map((edge) => {
-          const source = byId.get(edge.source);
-          const target = byId.get(edge.target);
-          if (!source || !target) return null;
-          return <line key={edge.id} x1={source.x} y1={source.y} x2={target.x} y2={target.y} className={`edge ${edge.kind}`} />;
-        })}
-        {layout.map((node) => (
-          <g key={node.id} className={`node ${node.kind}`} transform={`translate(${node.x} ${node.y})`} onClick={() => onSelectNode(node)}>
-            <circle r={node.kind === "deck" ? 22 : node.kind === "topic" ? 17 : 12} />
-            <text y={32}>{shorten(node.label, 28)}</text>
-          </g>
-        ))}
-        </svg>
+        <div className="graph-summary" aria-label="Visible graph summary">
+          <span>{graphData.nodes.length} nodes</span>
+          <span>{graphData.edges.length} edges</span>
+          <strong>{graphStats.due} due</strong>
+          <span>{graphStats.overdue} overdue</span>
+          <span>{graphStats.weak} weak</span>
+          <span>{graphStats.newCards} new</span>
         </div>
+        <div
+          ref={scrollRef}
+          className="graph-scroll"
+          onMouseDown={(event) => {
+            const target = event.target as HTMLElement;
+            if (target.closest(".node")) return;
+            const container = scrollRef.current;
+            if (!container) return;
+            dragRef.current = { x: event.clientX, y: event.clientY, left: container.scrollLeft, top: container.scrollTop };
+            container.classList.add("is-panning");
+          }}
+          onMouseMove={(event) => {
+            const drag = dragRef.current;
+            const container = scrollRef.current;
+            if (!drag || !container) return;
+            container.scrollLeft = drag.left - (event.clientX - drag.x);
+            container.scrollTop = drag.top - (event.clientY - drag.y);
+          }}
+          onMouseUp={() => {
+            dragRef.current = null;
+            scrollRef.current?.classList.remove("is-panning");
+          }}
+          onMouseLeave={() => {
+            dragRef.current = null;
+            scrollRef.current?.classList.remove("is-panning");
+          }}
+        >
+          <svg
+            className="graph"
+            style={{ width: `${layout.size.width * zoom}px`, height: `${layout.size.height * zoom}px` }}
+            viewBox={`0 0 ${layout.size.width} ${layout.size.height}`}
+          >
+            {graphData.edges.map((edge) => {
+              const source = byId.get(edge.source);
+              const target = byId.get(edge.target);
+              if (!source || !target) return null;
+              return <line key={edge.id} x1={source.x} y1={source.y} x2={target.x} y2={target.y} className={`edge ${edge.kind}`} />;
+            })}
+            {layout.nodes.map((node) => {
+              const stats = summarizeCards(cardsForGraphNode(snapshot.cards, node.id));
+              const isSelected = selectedNode?.id === node.id;
+              return (
+                <g
+                  key={node.id}
+                  className={`node ${node.kind} ${graphNodeSignalClasses(stats, isSelected)}`}
+                  transform={`translate(${node.x} ${node.y})`}
+                  onClick={() => onSelectNode(node)}
+                >
+                  <circle r={nodeRadius(node)} />
+                  {(stats.overdue > 0 || stats.weak > 0) && <circle className="node-ring" r={nodeRadius(node) + 6} />}
+                  <text y={nodeRadius(node) + 17}>{shorten(node.label, 28)}</text>
+                </g>
+              );
+            })}
+          </svg>
+          {layout.nodes.length === 0 && (
+            <div className="graph-empty">
+              No graph nodes match these filters.
+            </div>
+          )}
+        </div>
+        <p className="graph-hint">Drag the background or use scrollbars to pan. Fit brings large decks/topics back into view.</p>
       </div>
       <aside className="details">
         {selectedNode ? (
           <>
-            <h2>{selectedNode.label}</h2>
-            <p>{selectedNode.kind}</p>
-            <dl>
-              <dt>Total</dt><dd>{selectedNode.total_cards}</dd>
-              <dt>Due</dt><dd>{selectedNode.due_cards}</dd>
-              <dt>Weak</dt><dd>{selectedNode.weak_cards}</dd>
+            <div className="details-heading">
+              <div>
+                <h2>{selectedNode.label}</h2>
+                <p>{selectedNode.kind}{visibleNodeIds.has(selectedNode.id) ? "" : " · hidden by current filters"}</p>
+              </div>
+              {isSystemGraphNode(selectedNode) && <span className="signal-badge">cluster</span>}
+            </div>
+            <dl className="details-stats">
+              <dt>Total</dt><dd>{selectedStats.total}</dd>
+              <dt>Due now</dt><dd>{selectedStats.due}</dd>
+              <dt>Overdue</dt><dd>{selectedStats.overdue}</dd>
+              <dt>Weak</dt><dd>{selectedStats.weak}</dd>
+              <dt>New</dt><dd>{selectedStats.newCards}</dd>
+              <dt>Upcoming</dt><dd>{selectedStats.upcoming}</dd>
+              <dt>Avg ease</dt><dd>{selectedStats.total > 0 ? selectedStats.averageEase.toFixed(2) : "—"}</dd>
+              <dt>Avg interval</dt><dd>{selectedStats.total > 0 ? `${selectedStats.averageIntervalDays.toFixed(1)}d` : "—"}</dd>
             </dl>
             <div className="button-row">
               <button onClick={() => onStartDue(selectedNode)} disabled={selectedDueCount === 0}>Learn Due</button>
-              <button onClick={() => onPractice(selectedNode)} disabled={selectedCards.length === 0}>Practice All</button>
+              <button onClick={() => onPractice(selectedNode)} disabled={detailCards.length === 0}>Practice Visible</button>
               {selectedCard && <button onClick={() => onOpenCard(selectedCard)}>Open Source Block</button>}
               {canOpenPage && <button onClick={() => onOpenPageByName(selectedNode.label)}>Open Page</button>}
             </div>
+            {selectedStats.topTopics.length > 0 && (
+              <div className="details-card-list compact">
+                <strong>Topic pressure</strong>
+                {selectedStats.topTopics.slice(0, 6).map((topic) => (
+                  <span key={`${topic.deck}:${topic.topic}`}>
+                    {topic.topic} · {topic.count} cards · {topic.due} due · {topic.weak} weak
+                  </span>
+                ))}
+              </div>
+            )}
             {selectedCard && (
               <article className="details-card">
                 <strong>{selectedCard.question}</strong>
                 <p>{selectedCard.answer_markdown || "(No answer child blocks)"}</p>
               </article>
             )}
-            {selectedCards.length > 1 && (
+            {detailCards.length > 1 && (
               <div className="details-card-list">
-                <strong>Related cards</strong>
-                {selectedCards.slice(0, 6).map((card) => (
-                  <button key={card.id} onClick={() => onOpenCard(card)}>
-                    {shorten(card.question, 48)}
+                <strong>Related cards ({detailCards.length})</strong>
+                {detailCards.slice(0, 12).map((card) => (
+                  <button key={card.id} onClick={() => onOpenCard(card)} className={isWeak(card) || isOverdue(card) ? "attention" : undefined}>
+                    {shorten(card.question, 52)}
+                    <small>{card.deck} / {card.topic} · {dueLabel(card)}</small>
                   </button>
                 ))}
+                {detailCards.length > 12 && <span className="details-more">+{detailCards.length - 12} more cards hidden</span>}
               </div>
             )}
           </>
         ) : (
-          <p>Select a graph node.</p>
+          <p>Select a graph node. Use filters to isolate due, weak, new, or deck-specific clusters.</p>
         )}
       </aside>
     </section>
@@ -4795,6 +4932,14 @@ function cardsForGraphNode(cards: StudyCard[], nodeId: string) {
     return cards.filter(isWeak);
   }
 
+  if (nodeId === "concept:overdue-cards") {
+    return cards.filter(isOverdue);
+  }
+
+  if (nodeId === "concept:new-cards") {
+    return cards.filter(isNewCard);
+  }
+
   if (nodeId.startsWith("concept:")) {
     const conceptSlug = nodeId.slice("concept:".length);
     return cards.filter((card) =>
@@ -5442,25 +5587,183 @@ function isWeak(card: StudyCard) {
   return card.srs.lapses >= 2 || card.srs.ease <= 1.6 || card.srs.last_rating === "again" || card.srs.hard_count >= 2;
 }
 
-function layoutGraph(nodes: StudyGraphNode[]) {
+function isOverdue(card: StudyCard) {
+  return isDue(card) && !isNewCard(card);
+}
+
+function applyGraphCardFilters(cards: StudyCard[], statusFilter: GraphStatusFilter, deckFilter: string) {
+  let filtered = [...cards];
+  if (deckFilter !== "all") {
+    filtered = filtered.filter((card) => card.deck_slug === deckFilter);
+  }
+
+  if (statusFilter === "due") {
+    filtered = filtered.filter(isDue);
+  } else if (statusFilter === "overdue") {
+    filtered = filtered.filter(isOverdue);
+  } else if (statusFilter === "weak") {
+    filtered = filtered.filter(isWeak);
+  } else if (statusFilter === "new") {
+    filtered = filtered.filter(isNewCard);
+  }
+
+  return filtered;
+}
+
+function filterGraphForView(snapshot: DesktopSnapshot, statusFilter: GraphStatusFilter, deckFilter: string) {
+  const graph = graphWithLearningClusters(snapshot);
+  const filteredCardIds = new Set(
+    applyGraphCardFilters(snapshot.cards, statusFilter, deckFilter).map((card) => `card:${card.id}`),
+  );
+
+  if (statusFilter === "all" && deckFilter === "all") {
+    return graph;
+  }
+
+  const nodes = graph.nodes.filter((node) => {
+    if (node.kind === "card") {
+      return filteredCardIds.has(node.id);
+    }
+    return applyGraphCardFilters(cardsForGraphNode(snapshot.cards, node.id), statusFilter, deckFilter).length > 0;
+  });
+  const visibleIds = new Set(nodes.map((node) => node.id));
+  const edges = graph.edges.filter((edge) => visibleIds.has(edge.source) && visibleIds.has(edge.target));
+  return { nodes, edges };
+}
+
+function graphWithLearningClusters(snapshot: DesktopSnapshot) {
+  const nodes = [...snapshot.graph.nodes];
+  const edges = [...snapshot.graph.edges];
+  appendLearningCluster(nodes, edges, "concept:overdue-cards", "Overdue Cards", snapshot.cards.filter(isOverdue));
+  appendLearningCluster(nodes, edges, "concept:new-cards", "New Cards", snapshot.cards.filter(isNewCard));
+  return { nodes, edges };
+}
+
+function appendLearningCluster(
+  nodes: StudyGraphNode[],
+  edges: StudyGraphEdge[],
+  id: string,
+  label: string,
+  cards: StudyCard[],
+) {
+  if (cards.length === 0 || nodes.some((node) => node.id === id)) {
+    return;
+  }
+  nodes.push({
+    id,
+    kind: "concept",
+    label,
+    total_cards: cards.length,
+    due_cards: cards.filter(isDue).length,
+    weak_cards: cards.filter(isWeak).length,
+  });
+  for (const card of cards) {
+    edges.push({
+      id: `Related:${id}:card:${card.id}`,
+      source: id,
+      target: `card:${card.id}`,
+      kind: "related",
+    });
+  }
+}
+
+function summarizeCards(cards: StudyCard[]) {
+  const topicMap = new Map<string, { deck: string; topic: string; count: number; due: number; weak: number }>();
+  let easeTotal = 0;
+  let intervalTotal = 0;
+
+  for (const card of cards) {
+    easeTotal += card.srs.ease;
+    intervalTotal += card.srs.interval_days;
+    const key = `${card.deck_slug}:${card.topic_slug}`;
+    const current = topicMap.get(key) ?? { deck: card.deck, topic: card.topic, count: 0, due: 0, weak: 0 };
+    current.count += 1;
+    current.due += Number(isDue(card));
+    current.weak += Number(isWeak(card));
+    topicMap.set(key, current);
+  }
+
+  return {
+    total: cards.length,
+    due: cards.filter(isDue).length,
+    overdue: cards.filter(isOverdue).length,
+    weak: cards.filter(isWeak).length,
+    newCards: cards.filter(isNewCard).length,
+    upcoming: cards.filter((card) => !isDue(card)).length,
+    averageEase: cards.length > 0 ? easeTotal / cards.length : 0,
+    averageIntervalDays: cards.length > 0 ? intervalTotal / cards.length : 0,
+    topTopics: Array.from(topicMap.values()).sort((left, right) => {
+      const pressureCompare = (right.due * 3 + right.weak * 2 + right.count) - (left.due * 3 + left.weak * 2 + left.count);
+      if (pressureCompare !== 0) return pressureCompare;
+      return left.topic.localeCompare(right.topic);
+    }),
+  };
+}
+
+function isSystemGraphNode(node: StudyGraphNode) {
+  return node.id === "concept:weak-cards" || node.id === "concept:overdue-cards" || node.id === "concept:new-cards";
+}
+
+function graphNodeSignalClasses(stats: ReturnType<typeof summarizeCards>, isSelected: boolean) {
+  return [
+    isSelected ? "selected" : "",
+    stats.overdue > 0 ? "overdue" : "",
+    stats.weak > 0 ? "weak" : "",
+    stats.newCards > 0 && stats.total === stats.newCards ? "new" : "",
+  ].filter(Boolean).join(" ");
+}
+
+function nodeRadius(node: StudyGraphNode) {
+  const base = node.kind === "deck" ? 22 : node.kind === "topic" ? 17 : node.kind === "concept" ? 15 : 12;
+  return Math.min(base + Math.floor(Math.sqrt(node.total_cards || 1)), base + 8);
+}
+
+function clampZoom(value: number) {
+  return Math.min(2.8, Math.max(0.35, Number(value.toFixed(2))));
+}
+
+function layoutGraph(nodes: StudyGraphNode[], edges: StudyGraphEdge[]) {
   const lanes: Record<StudyGraphNode["kind"], number> = {
     deck: 90,
-    topic: 280,
-    card: 500,
-    concept: 720,
-    source: 890,
+    topic: 300,
+    card: 540,
+    concept: 790,
+    source: 1030,
   };
-  const counters: Record<StudyGraphNode["kind"], number> = {
-    deck: 0,
-    topic: 0,
-    card: 0,
-    concept: 0,
-    source: 0,
+  const grouped: Record<StudyGraphNode["kind"], StudyGraphNode[]> = {
+    deck: [],
+    topic: [],
+    card: [],
+    concept: [],
+    source: [],
   };
-  return nodes.map((node) => {
-    const index = counters[node.kind]++;
-    return { ...node, x: lanes[node.kind], y: 70 + index * 76 };
+  for (const node of nodes) {
+    grouped[node.kind].push(node);
+  }
+
+  const orderNodes = (items: StudyGraphNode[]) => [...items].sort((left, right) => {
+    const signalCompare = (right.due_cards + right.weak_cards) - (left.due_cards + left.weak_cards);
+    if (signalCompare !== 0) return signalCompare;
+    return left.label.localeCompare(right.label);
   });
+
+  const laidOut: Array<StudyGraphNode & { x: number; y: number }> = [];
+  let maxLaneCount = 1;
+  (Object.keys(grouped) as Array<StudyGraphNode["kind"]>).forEach((kind) => {
+    const ordered = orderNodes(grouped[kind]);
+    maxLaneCount = Math.max(maxLaneCount, ordered.length);
+    ordered.forEach((node, index) => {
+      laidOut.push({ ...node, x: lanes[kind], y: 70 + index * 78 });
+    });
+  });
+
+  const maxY = Math.max(620, 150 + maxLaneCount * 78);
+  const maxX = Math.max(1120, Math.max(...laidOut.map((node) => node.x), 1030) + 120);
+  return {
+    nodes: laidOut,
+    edges,
+    size: { width: maxX, height: maxY },
+  };
 }
 
 function titleForScreen(screen: Screen) {

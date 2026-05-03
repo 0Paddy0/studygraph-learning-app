@@ -1255,32 +1255,106 @@ label {
 
 .graph-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 280px;
+  grid-template-columns: minmax(0, 1fr) 340px;
   gap: 14px;
   min-height: 0;
 }
 
+.graph-toolbar {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: end;
+  margin-bottom: 8px;
+}
+
+.graph-filters {
+  display: grid;
+  grid-template-columns: minmax(150px, 190px) minmax(180px, 240px);
+  gap: 10px;
+}
+
+.graph-filters label {
+  font-size: 12px;
+}
+
+.graph-filters select {
+  min-height: 34px;
+  padding: 7px 9px;
+}
+
+.graph-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: #8eb0af;
+  font-size: 12px;
+}
+
+.graph-summary span,
+.graph-summary strong,
+.signal-badge {
+  border: 1px solid rgba(178, 211, 210, 0.16);
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.graph-summary strong,
+.signal-badge {
+  color: #d6a72f;
+}
+
 .graph-scroll {
+  position: relative;
   overflow: auto;
-  max-height: calc(100vh - 180px);
+  max-height: calc(100vh - 250px);
+  min-height: 520px;
   border: 1px solid rgba(178, 211, 210, 0.16);
   border-radius: 8px;
-  background: #073942;
+  background: radial-gradient(circle at 20% 20%, rgba(107, 179, 182, 0.08), transparent 32%), #073942;
+  cursor: grab;
+  user-select: none;
+}
+
+.graph-scroll.is-panning {
+  cursor: grabbing;
 }
 
 .graph {
-  width: max(100%, 980px);
-  min-height: 620px;
+  min-width: 100%;
+  min-height: 100%;
   display: block;
 }
 
+.graph-empty {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #8eb0af;
+  pointer-events: none;
+}
+
+.graph-hint {
+  margin: 8px 0 0;
+  color: #8eb0af;
+  font-size: 12px;
+}
+
 .edge {
-  stroke: rgba(169, 195, 194, 0.55);
-  stroke-width: 1.4;
+  stroke: rgba(169, 195, 194, 0.42);
+  stroke-width: 1.25;
 }
 
 .edge.references {
   stroke-dasharray: 4 4;
+}
+
+.edge.related {
+  stroke: rgba(214, 167, 47, 0.65);
+  stroke-dasharray: 7 4;
 }
 
 .node {
@@ -1290,6 +1364,30 @@ label {
 .node circle {
   stroke: rgba(255, 255, 255, 0.36);
   stroke-width: 1.4;
+}
+
+.node.selected circle:first-child {
+  stroke: #f4f1e8;
+  stroke-width: 3;
+}
+
+.node.overdue circle:first-child {
+  fill: #c8614a;
+}
+
+.node.weak:not(.overdue) circle:first-child {
+  fill: #d6a72f;
+}
+
+.node.new:not(.weak):not(.overdue) circle:first-child {
+  fill: #6bb3b6;
+}
+
+.node-ring {
+  fill: none !important;
+  stroke: rgba(214, 167, 47, 0.52) !important;
+  stroke-width: 2 !important;
+  stroke-dasharray: 5 5;
 }
 
 .node.deck circle {
@@ -1321,7 +1419,25 @@ label {
   stroke-width: 3px;
 }
 
-.details dl {
+.details {
+  overflow: auto;
+  max-height: calc(100vh - 140px);
+}
+
+.details-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.details-heading p {
+  margin: 3px 0 0;
+  color: #8eb0af;
+}
+
+.details dl,
+.details-stats {
   display: grid;
   grid-template-columns: 1fr auto;
   gap: 7px 10px;
@@ -1349,6 +1465,13 @@ label {
   gap: 8px;
 }
 
+.details-card-list.compact span,
+.details-more {
+  color: #a9c3c2;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
 .details-card p {
   margin: 0;
   color: #a9c3c2;
@@ -1360,6 +1483,17 @@ label {
   width: 100%;
   min-height: 30px;
   text-align: left;
+  display: grid;
+  gap: 3px;
+}
+
+.details-card-list button small {
+  color: #8eb0af;
+}
+
+.details-card-list button.attention {
+  border-color: rgba(214, 167, 47, 0.55);
+  background: rgba(214, 167, 47, 0.1);
 }
 
 .generator-panel,
@@ -1734,7 +1868,6 @@ label {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 8px;
   color: #8eb0af;
 }
 
