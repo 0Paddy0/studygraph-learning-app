@@ -1524,6 +1524,44 @@ label {
   color: #8eb0af;
 }
 
+.privacy-note,
+.quality-list {
+  border: 1px solid rgba(178, 211, 210, 0.14);
+  background: rgba(4, 25, 31, 0.35);
+  border-radius: 8px;
+  color: #b8d2cf;
+  padding: 10px 12px;
+}
+
+.privacy-note {
+  margin: 0;
+  line-height: 1.45;
+}
+
+.quality-list {
+  display: grid;
+  gap: 6px;
+  list-style: none;
+  margin: 0;
+}
+
+.quality-list.compact {
+  margin: 8px 0;
+  padding: 8px 10px;
+}
+
+.quality-info {
+  color: #8eb0af;
+}
+
+.quality-warning {
+  color: #f3d27a;
+}
+
+.quality-error {
+  color: #ff9a9a;
+}
+
 .generator-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(150px, 1fr));

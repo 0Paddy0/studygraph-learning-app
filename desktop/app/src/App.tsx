@@ -45,10 +45,14 @@ import {
   updateBlockContent,
 } from "./api";
 import {
+  aiQualitySummary,
+  createConfiguredAiProvider,
+  runLocalAiClozeGeneration,
+} from "./aiPipeline";
+import {
   applyGraphCardFilters,
   backlinksForPage,
   buildBlockLocations,
-  buildClozePrompt,
   buildPracticeQueue,
   buildReviewQueue,
   buildSearchResults,
@@ -101,6 +105,7 @@ import {
 import type {
   AppBackup,
   AppDebugInfo,
+  AiQualityIssue,
   AppSettings,
   BacklinkReference,
   Block,
@@ -276,6 +281,7 @@ export function App() {
     };
   });
   const [generatedCards, setGeneratedCards] = useState<GeneratedCard[]>([]);
+  const [generatorIssues, setGeneratorIssues] = useState<AiQualityIssue[]>([]);
   const [generatorStatus, setGeneratorStatus] = useState<string | null>(null);
   const [debugInfo, setDebugInfo] = useState<AppDebugInfo | null>(null);
   const [debugStatus, setDebugStatus] = useState<string | null>(null);
@@ -858,12 +864,16 @@ export function App() {
 
   function generateCardsPreview() {
     setError(null);
-    const cards = generateLocalCards(generatorInput);
-    setGeneratedCards(cards);
+    const provider = createConfiguredAiProvider(settings);
+    const response = provider.generateCards({ input: generatorInput, existingCards: cards });
+    setGeneratedCards(response.cards);
+    setGeneratorIssues(response.issues);
     setGeneratorStatus(
-      cards.length > 0
-        ? `Generated ${cards.length} local preview cards.`
-        : "Add source text with at least one meaningful sentence.",
+      response.cards.length > 0
+        ? `Generated ${response.cards.length} local preview cards (${aiQualitySummary(response.issues)}).`
+        : response.diagnostics.candidateCards > 0
+          ? `All generated candidates were duplicates or failed quality checks (${aiQualitySummary(response.issues)}).`
+          : "Add source text with at least one meaningful sentence.",
     );
   }
 
@@ -970,12 +980,16 @@ export function App() {
     };
 
     setGeneratorInput(nextInput);
-    const cards = generateLocalCards(nextInput);
-    setGeneratedCards(cards);
+    const provider = createConfiguredAiProvider(settings);
+    const response = provider.generateCards({ input: nextInput, existingCards: cards });
+    setGeneratedCards(response.cards);
+    setGeneratorIssues(response.issues);
     setGeneratorStatus(
-      cards.length > 0
-        ? `Prepared ${cards.length} local AI-style preview cards from ${sourceLabel}. No external API call was made.`
-        : "Selected Doc text is too short for local card generation.",
+      response.cards.length > 0
+        ? `Prepared ${response.cards.length} local AI-style preview cards from ${sourceLabel} (${aiQualitySummary(response.issues)}). No external API call was made.`
+        : response.diagnostics.candidateCards > 0
+          ? `Doc parsing found candidates, but they were duplicates or failed quality checks (${aiQualitySummary(response.issues)}).`
+          : "Selected Doc text is too short for local card generation.",
     );
     setDocStatus(`Sent ${sourceLabel} to Generate Cards with the selected AI parsing options.`);
     setScreen("generate");
@@ -1486,6 +1500,7 @@ export function App() {
           <GeneratorView
             input={generatorInput}
             cards={generatedCards}
+            issues={generatorIssues}
             status={generatorStatus}
             selectedPageName={selectedPage?.name}
             onInputChange={(patch) => setGeneratorInput((current) => ({ ...current, ...patch }))}
@@ -2856,7 +2871,8 @@ function ClozeAnswer({
   onRate?: (rating: Rating, clozeResult: ClozeSessionResult) => void;
   onResultChange?: (clozeResult: ClozeSessionResult) => void;
 }) {
-  const cloze = useMemo(() => buildClozePrompt(card), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
+  const clozeResponse = useMemo(() => runLocalAiClozeGeneration({ card }), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
+  const cloze = clozeResponse.cloze;
   const [answers, setAnswers] = useState<string[]>(() => cloze.blanks.map(() => ""));
   const inputRefs = useRef<Array<HTMLInputElement | null>>([]);
 
@@ -2907,7 +2923,14 @@ function ClozeAnswer({
   return (
     <article className="answer-card cloze-card">
       <h3>AI Cloze Answer</h3>
-      <p className="cloze-hint">Fill the blacked-out key words. Enter moves to the next blank, then applies the suggested rating when all blanks are checked. Tab keeps normal navigation.</p>
+      <p className="cloze-hint">Offline local pipeline: fill the blacked-out key words. Enter moves to the next blank, then applies the suggested rating when all blanks are checked.</p>
+      {clozeResponse.issues.some((issue) => issue.level !== "info") && (
+        <ul className="quality-list compact">
+          {clozeResponse.issues.filter((issue) => issue.level !== "info").map((issue, index) => (
+            <li key={`${issue.code}-${index}`} className={`quality-${issue.level}`}>{issue.message}</li>
+          ))}
+        </ul>
+      )}
       <div className="cloze-text">
         {cloze.parts.map((part, index) => (
           part.kind === "text" ? (
@@ -3699,6 +3722,7 @@ function GraphView({
 function GeneratorView({
   input,
   cards,
+  issues,
   status,
   selectedPageName,
   onInputChange,
@@ -3708,6 +3732,7 @@ function GeneratorView({
 }: {
   input: CardGeneratorInput;
   cards: GeneratedCard[];
+  issues: AiQualityIssue[];
   status: string | null;
   selectedPageName?: string;
   onInputChange: (patch: Partial<CardGeneratorInput>) => void;
@@ -3722,11 +3747,15 @@ function GeneratorView({
       <div className="generator-panel">
         <div className="generator-heading">
           <div>
-            <h2>Offline Card Generator</h2>
-            <p>Creates deterministic preview cards locally. No text leaves this device.</p>
+            <h2>Offline AI Pipeline</h2>
+            <p>Provider: local heuristic v1. Creates deterministic card and cloze previews locally; no text leaves this device.</p>
           </div>
           <span>{selectedPageName ? `Target page: ${selectedPageName}` : "No page selected"}</span>
         </div>
+
+        <aside className="privacy-note">
+          External OpenAI/API settings are metadata-only in this build. Future provider hookup belongs in <code>aiPipeline.ts</code> and must pass explicit privacy/quality checks before requests are enabled.
+        </aside>
 
         <div className="generator-grid">
           <label>
@@ -3818,6 +3847,15 @@ function GeneratorView({
           <button onClick={onCopy} disabled={cards.length === 0}>Copy as Markdown</button>
         </div>
         {status && <p className="status">{status}</p>}
+        {issues.length > 0 && (
+          <ul className="quality-list">
+            {issues.map((issue, index) => (
+              <li key={`${issue.code}-${index}`} className={`quality-${issue.level}`}>
+                <strong>{issue.level}</strong> · {issue.message}
+              </li>
+            ))}
+          </ul>
+        )}
       </div>
 
       <div className="generator-preview">
@@ -4318,90 +4356,6 @@ function CommandPalette({
   );
 }
 
-function generateLocalCards(input: CardGeneratorInput): GeneratedCard[] {
-  const sentences = splitSourceSentences(input.source_text);
-  const definitionFacts = extractDefinitionFacts(input.source_text);
-  if (sentences.length === 0 && definitionFacts.length === 0) {
-    return [];
-  }
-
-  const language = resolveGeneratorLanguage(input.language, input.source_text);
-  const deck = singleLine(input.deck, "Generated");
-  const topic = singleLine(input.topic, "General");
-  const vocabularyDeck = singleLine(input.vocabulary_deck, `${deck} Vocabulary`);
-  const limit = clampNumber(input.number_of_cards, 1, 30);
-  const directCards = definitionFacts.slice(0, limit).map((fact) => ({
-    question: fact.question || (language === "de" ? `Was bedeutet "${fact.term}" im Kontext ${topic}?` : `What does "${fact.term}" mean in the context of ${topic}?`),
-    answer: fact.answer,
-    deck,
-    topic,
-    tags: ["generated", input.difficulty, "definition"],
-    source_summary: shorten(fact.answer, 120),
-  } satisfies GeneratedCard));
-  const directSources = new Set(definitionFacts.map((fact) => fact.source));
-  const remainingSentences = sentences.filter((sentence) => !directSources.has(sentence));
-  const remainingLimit = Math.max(0, limit - directCards.length);
-
-  const sentenceCards = remainingSentences.slice(0, remainingLimit).map((sentence, index) => {
-    const term = pickKeyTerm(sentence, topic);
-    const style = input.card_style === "mixed" ? (index % 3 === 1 ? "cloze" : "basic") : input.card_style;
-    const promptPrefix =
-      input.difficulty === "hard"
-        ? language === "de" ? "Erklaere technisch praezise" : "Explain precisely"
-        : input.difficulty === "easy"
-          ? language === "de" ? "Was bedeutet" : "What does"
-          : language === "de" ? "Wie erklaerst du" : "How would you explain";
-    const contextPhrase = language === "de" ? `im Kontext ${topic}` : `in the context of ${topic}`;
-
-    if (style === "cloze") {
-      return {
-        question: language === "de"
-          ? `Ergaenze den zentralen Begriff: ${maskTerm(sentence, term)}`
-          : `Fill in the key term: ${maskTerm(sentence, term)}`,
-        answer: `${term}: ${sentence}`,
-        deck,
-        topic,
-        tags: ["generated", input.difficulty, "cloze"],
-        source_summary: shorten(sentence, 120),
-      } satisfies GeneratedCard;
-    }
-
-    return {
-      question: `${promptPrefix} "${term}" ${contextPhrase}?`,
-      answer: sentence,
-      deck,
-      topic,
-      tags: ["generated", input.difficulty, "basic"],
-      source_summary: shorten(sentence, 120),
-    } satisfies GeneratedCard;
-  });
-  const baseCards = [...directCards, ...sentenceCards];
-
-  const bidirectionalCards = input.bidirectional_cards
-    ? baseCards.map((card) => ({
-        question: language === "de" ? `Welche Frage passt zu: ${shorten(card.answer, 90)}?` : `Which prompt matches: ${shorten(card.answer, 90)}?`,
-        answer: card.question,
-        deck: card.deck,
-        topic: card.topic,
-        tags: [...card.tags.filter((tag) => !["basic", "cloze", "definition"].includes(tag)), "bidirectional"],
-        source_summary: card.source_summary,
-      } satisfies GeneratedCard))
-    : [];
-
-  const vocabularyCards = input.vocabulary_mode
-    ? extractVocabularyTerms([...definitionFacts.map((fact) => `${fact.term}: ${fact.answer}`), ...sentences], topic).slice(0, Math.min(limit, 12)).map(({ term, sentence }) => ({
-        question: language === "de" ? `Was bedeutet "${term}" in diesem Text?` : `What does "${term}" mean in this text?`,
-        answer: language === "de" ? `Kontext: ${sentence}` : `Context: ${sentence}`,
-        deck: vocabularyDeck,
-        topic: language === "de" ? "Vokabeln" : "Vocabulary",
-        tags: ["generated", "vocabulary", "language-learning"],
-        source_summary: shorten(sentence, 120),
-      } satisfies GeneratedCard))
-    : [];
-
-  return [...baseCards, ...bidirectionalCards, ...vocabularyCards];
-}
-
 type DocFormatAction =
   | "bold"
   | "italic"
@@ -4673,214 +4627,6 @@ function saveFallbackAppSettings(settings: AppSettings) {
   } catch {
     // Local settings are only a fallback; the app remains usable without them.
   }
-}
-
-interface DefinitionFact {
-  term: string;
-  answer: string;
-  source: string;
-  question?: string;
-}
-
-function splitSourceSentences(value: string) {
-  const seen = new Set<string>();
-  const chunks: string[] = [];
-  for (const rawLine of value.replace(/\r/g, "").split(/\n+/)) {
-    const cleanLine = cleanSourceLine(rawLine);
-    if (!cleanLine) continue;
-    const parts = cleanLine.length > 220
-      ? cleanLine.split(/(?<=[.!?])\s+/)
-      : [cleanLine];
-    for (const part of parts) {
-      const cleanPart = singleLine(part.replace(/[.!?]+$/, ""), "");
-      const key = cleanPart.toLocaleLowerCase();
-      if (cleanPart.length >= 8 && !seen.has(key)) {
-        seen.add(key);
-        chunks.push(cleanPart);
-      }
-    }
-  }
-  return chunks;
-}
-
-function extractDefinitionFacts(value: string): DefinitionFact[] {
-  const lines = value.replace(/\r/g, "").split(/\n+/).map(cleanSourceLine).filter(Boolean);
-  const facts: DefinitionFact[] = [];
-  const seen = new Set<string>();
-
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index];
-    const next = lines[index + 1] ?? "";
-    const qaMatch = line.match(/^(?:q|frage|question)\s*[:?]\s*(.+)$/i);
-    const answerMatch = next.match(/^(?:a|antwort|answer)\s*[:\-]\s*(.+)$/i);
-    if (qaMatch && answerMatch) {
-      addDefinitionFact(facts, seen, {
-        term: pickKeyTerm(qaMatch[1], ""),
-        question: singleLine(qaMatch[1], "Generated question"),
-        answer: singleLine(answerMatch[1], "Generated answer"),
-        source: line,
-      });
-      index += 1;
-      continue;
-    }
-
-    const arrowMatch = line.match(/^(.{2,80}?)\s*(?:=>|->|—|–)\s*(.{8,})$/);
-    if (arrowMatch) {
-      addDefinitionFact(facts, seen, {
-        term: cleanTerm(arrowMatch[1]),
-        answer: singleLine(arrowMatch[2], "Generated answer"),
-        source: line,
-      });
-      continue;
-    }
-
-    const colonMatch = line.match(/^([^:]{2,70}):\s*(.{8,})$/);
-    if (colonMatch && !/^(sgd-|deck|topic|card)\b/i.test(colonMatch[1])) {
-      addDefinitionFact(facts, seen, {
-        term: cleanTerm(colonMatch[1]),
-        answer: singleLine(colonMatch[2], "Generated answer"),
-        source: line,
-      });
-    }
-  }
-
-  return facts;
-}
-
-function cleanSourceLine(value: string) {
-  const trimmed = value
-    .trim()
-    .replace(/^#{1,6}\s+/, "")
-    .replace(/^[-*+]\s+/, "")
-    .replace(/^\d+[.)]\s+/, "")
-    .replace(/^TODO\s+/i, "");
-  if (!trimmed || /^(sgd-|deck|topic|card)[\w-]*::/i.test(trimmed)) return "";
-  return singleLine(stripPageLinks(trimmed), "");
-}
-
-function cleanTerm(value: string) {
-  return singleLine(value.replace(/^[`*_]+|[`*_]+$/g, ""), "concept").replace(/[.:;,-]+$/, "");
-}
-
-function addDefinitionFact(facts: DefinitionFact[], seen: Set<string>, fact: DefinitionFact) {
-  const term = cleanTerm(fact.term);
-  const answer = singleLine(fact.answer, "");
-  const key = `${term.toLocaleLowerCase()}::${answer.toLocaleLowerCase()}`;
-  if (!term || !answer || seen.has(key)) return;
-  seen.add(key);
-  facts.push({ ...fact, term, answer });
-}
-
-function resolveGeneratorLanguage(language: CardGeneratorInput["language"], sourceText: string): "de" | "en" {
-  if (language === "de" || language === "en") {
-    return language;
-  }
-  const lower = ` ${sourceText.toLocaleLowerCase()} `;
-  return /[äöüß]/i.test(sourceText) || /\b(der|die|das|und|ist|eine|einen|mit|fuer|für|nicht)\b/.test(lower)
-    ? "de"
-    : "en";
-}
-
-function extractVocabularyTerms(sentences: string[], topic: string) {
-  const seen = new Set<string>();
-  const terms: Array<{ term: string; sentence: string }> = [];
-
-  for (const sentence of sentences) {
-    for (const rawWord of sentence.replace(/[`*_()[\]{}"':;,.!?]/g, " ").split(/\s+/)) {
-      const term = rawWord.trim();
-      const normalized = term.toLocaleLowerCase();
-      if (term.length < 4 || seen.has(normalized) || normalizeVocabularyStopWords(topic).has(normalized)) {
-        continue;
-      }
-      seen.add(normalized);
-      terms.push({ term, sentence });
-    }
-  }
-
-  return terms.sort((left, right) => right.term.length - left.term.length);
-}
-
-function normalizeVocabularyStopWords(topic: string) {
-  return new Set([
-    "about",
-    "after",
-    "also",
-    "and",
-    "are",
-    "because",
-    "das",
-    "der",
-    "die",
-    "eine",
-    "einen",
-    "for",
-    "from",
-    "ist",
-    "mit",
-    "nicht",
-    "oder",
-    "that",
-    "the",
-    "this",
-    "und",
-    "von",
-    "was",
-    "were",
-    "with",
-    ...topic.split(/[\s/,-]+/).map((word) => word.toLocaleLowerCase()).filter((word) => word.length > 0),
-  ]);
-}
-
-function pickKeyTerm(sentence: string, topic: string) {
-  const stopWords = new Set([
-    "about",
-    "after",
-    "also",
-    "and",
-    "are",
-    "because",
-    "das",
-    "der",
-    "die",
-    "eine",
-    "einen",
-    "for",
-    "from",
-    "ist",
-    "mit",
-    "nicht",
-    "oder",
-    "that",
-    "the",
-    "this",
-    "und",
-    "von",
-    "was",
-    "were",
-    "with",
-  ]);
-  const topicWords = topic.split(/[\s/,-]+/).filter((word) => word.length > 3);
-  const words = sentence
-    .replace(/[`*_()[\]{}"':;,.!?]/g, " ")
-    .split(/\s+/)
-    .map((word) => word.trim())
-    .filter(Boolean);
-  const candidates = words.filter((word) => {
-    const normalized = word.toLocaleLowerCase();
-    return word.length >= 4 && !stopWords.has(normalized);
-  });
-
-  const topicCandidate = candidates.find((word) =>
-    topicWords.some((topicWord) => word.toLocaleLowerCase().includes(topicWord.toLocaleLowerCase())),
-  );
-  return topicCandidate ?? candidates.sort((left, right) => right.length - left.length)[0] ?? words[0] ?? "concept";
-}
-
-function maskTerm(sentence: string, term: string) {
-  if (!term) {
-    return sentence;
-  }
-  return sentence.replace(new RegExp(escapeRegExp(term), "i"), "____");
 }
 
 function formatGeneratedCardsAsMarkdown(cards: GeneratedCard[]) {

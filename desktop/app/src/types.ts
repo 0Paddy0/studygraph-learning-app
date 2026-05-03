@@ -25,6 +25,70 @@ export interface GeneratedCard {
   source_summary?: string;
 }
 
+export type AiProviderKind = "local-heuristic" | "external-api-placeholder";
+export type AiPipelineFeature = "card-generation" | "cloze-generation";
+export type AiQualityIssueLevel = "info" | "warning" | "error";
+
+export interface AiQualityIssue {
+  level: AiQualityIssueLevel;
+  code: string;
+  message: string;
+  cardIndex?: number;
+  field?: "question" | "answer" | "source";
+}
+
+export interface AiCardGenerationRequest {
+  input: CardGeneratorInput;
+  existingCards?: StudyCard[];
+  providerId?: string;
+  allowExternalRequests?: boolean;
+}
+
+export interface AiCardGenerationResponse {
+  providerId: string;
+  providerKind: AiProviderKind;
+  offline: boolean;
+  cards: GeneratedCard[];
+  issues: AiQualityIssue[];
+  diagnostics: {
+    requestedCards: number;
+    candidateCards: number;
+    acceptedCards: number;
+    rejectedDuplicates: number;
+    qualityWarnings: number;
+  };
+}
+
+export type ClozePromptPart =
+  | { kind: "text"; value: string }
+  | { kind: "blank"; blankIndex: number };
+
+export interface AiClozePrompt {
+  text: string;
+  parts: ClozePromptPart[];
+  blanks: string[];
+}
+
+export interface AiClozeGenerationRequest {
+  card: StudyCard;
+  providerId?: string;
+  maxBlanks?: number;
+  allowExternalRequests?: boolean;
+}
+
+export interface AiClozeGenerationResponse {
+  providerId: string;
+  providerKind: AiProviderKind;
+  offline: boolean;
+  cloze: AiClozePrompt;
+  issues: AiQualityIssue[];
+  diagnostics: {
+    blankCount: number;
+    answerCharacters: number;
+    qualityWarnings: number;
+  };
+}
+
 export interface AppSettings {
   defaultDeck: string;
   defaultTopic: string;
