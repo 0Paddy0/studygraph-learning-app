@@ -127,6 +127,17 @@ export interface ReviewEvent {
 
 export type ReviewSessionKind = "review" | "practice";
 
+export interface ClozeBlankResult {
+  expected: string;
+  input: string;
+  correct: boolean;
+}
+
+export interface ClozeSessionResult {
+  blanks: ClozeBlankResult[];
+  suggestedRating: Rating;
+}
+
 export interface ReviewSessionItem {
   id: string;
   sessionId: string;
@@ -134,6 +145,7 @@ export interface ReviewSessionItem {
   question: string;
   rating: Rating;
   responseTimeMs?: number | null;
+  clozeResult?: ClozeSessionResult | null;
   answeredAt: string;
   position: number;
 }

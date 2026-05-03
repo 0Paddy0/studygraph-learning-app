@@ -1,7 +1,7 @@
 use crate::model::{
-    AppBackup, AppSettings, Block, CardState, DocBlock, DocBlockKind, DocPage, Page, Rating,
-    ReviewEvent, ReviewSession, ReviewSessionItem, ReviewSessionKind, SrsState, StudyCard,
-    Workspace,
+    AppBackup, AppSettings, Block, CardState, ClozeSessionResult, DocBlock, DocBlockKind, DocPage,
+    Page, Rating, ReviewEvent, ReviewSession, ReviewSessionItem, ReviewSessionKind, SrsState,
+    StudyCard, Workspace,
 };
 use crate::parser::scan_cards_from_pages;
 use chrono::{DateTime, Utc};
@@ -199,6 +199,7 @@ impl StudyGraphStorage {
                 question TEXT NOT NULL,
                 rating TEXT NOT NULL,
                 response_time_ms INTEGER,
+                cloze_result_json TEXT,
                 answered_at TEXT NOT NULL,
                 position INTEGER NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES review_sessions(id) ON DELETE CASCADE
@@ -256,6 +257,12 @@ impl StudyGraphStorage {
         )?;
         self.ensure_doc_page_metadata_columns()?;
         add_column_if_missing(&self.conn, "review_events", "response_time_ms", "INTEGER")?;
+        add_column_if_missing(
+            &self.conn,
+            "review_session_items",
+            "cloze_result_json",
+            "TEXT",
+        )?;
         Ok(())
     }
 
@@ -632,7 +639,7 @@ impl StudyGraphStorage {
     fn load_review_session_items(&self, session_id: Uuid) -> StorageResult<Vec<ReviewSessionItem>> {
         let mut stmt = self.conn.prepare(
             "
-            SELECT id, card_id, question, rating, response_time_ms, answered_at, position
+            SELECT id, card_id, question, rating, response_time_ms, cloze_result_json, answered_at, position
             FROM review_session_items
             WHERE session_id = ?1
             ORDER BY position ASC, answered_at ASC
@@ -645,8 +652,9 @@ impl StudyGraphStorage {
                 question: row.get(2)?,
                 rating: row.get(3)?,
                 response_time_ms: row.get(4)?,
-                answered_at: row.get(5)?,
-                position: row.get::<_, i64>(6)?,
+                cloze_result_json: row.get(5)?,
+                answered_at: row.get(6)?,
+                position: row.get::<_, i64>(7)?,
             })
         })?;
 
@@ -660,6 +668,11 @@ impl StudyGraphStorage {
                 question: row.question,
                 rating: rating_from_str(&row.rating),
                 response_time_ms: row.response_time_ms,
+                cloze_result: row
+                    .cloze_result_json
+                    .as_deref()
+                    .map(serde_json::from_str::<ClozeSessionResult>)
+                    .transpose()?,
                 answered_at: parse_datetime(&row.answered_at)?,
                 position: row.position.max(0) as u32,
             });
@@ -1453,8 +1466,8 @@ fn insert_review_session_item_conn(
     conn.execute(
         "
         INSERT INTO review_session_items
-            (id, session_id, card_id, question, rating, response_time_ms, answered_at, position)
-        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            (id, session_id, card_id, question, rating, response_time_ms, cloze_result_json, answered_at, position)
+        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
         ",
         params![
             item.id.to_string(),
@@ -1463,6 +1476,10 @@ fn insert_review_session_item_conn(
             item.question,
             rating_to_str(item.rating),
             item.response_time_ms,
+            item.cloze_result
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()?,
             item.answered_at.to_rfc3339(),
             position as i64,
         ],
@@ -1657,6 +1674,7 @@ struct StoredReviewSessionItemRow {
     question: String,
     rating: String,
     response_time_ms: Option<u32>,
+    cloze_result_json: Option<String>,
     answered_at: String,
     position: i64,
 }
@@ -1834,6 +1852,14 @@ mod tests {
                 question: "What is Rust?".to_string(),
                 rating: Rating::Good,
                 response_time_ms: Some(8_000),
+                cloze_result: Some(ClozeSessionResult {
+                    blanks: vec![crate::model::ClozeBlankResult {
+                        expected: "language".to_string(),
+                        input: "langauge".to_string(),
+                        correct: true,
+                    }],
+                    suggested_rating: Rating::Good,
+                }),
                 answered_at,
                 position: 99,
             }],
@@ -1854,6 +1880,11 @@ mod tests {
         assert_eq!(loaded.items[0].session_id, session.id);
         assert_eq!(loaded.items[0].position, 0);
         assert_eq!(loaded.items[0].response_time_ms, Some(8_000));
+        let cloze_result = loaded.items[0].cloze_result.as_ref().unwrap();
+        assert_eq!(cloze_result.blanks[0].expected, "language");
+        assert_eq!(cloze_result.blanks[0].input, "langauge");
+        assert!(cloze_result.blanks[0].correct);
+        assert_eq!(cloze_result.suggested_rating, Rating::Good);
         assert_eq!(recent.len(), 1);
         assert_eq!(recent[0].id, session.id);
     }
@@ -1938,6 +1969,34 @@ mod tests {
                 next_srs: next,
             })
             .unwrap();
+        storage
+            .save_review_session(&ReviewSession {
+                id: Uuid::new_v4(),
+                workspace_id: workspace.id,
+                kind: ReviewSessionKind::Review,
+                scope_label: "All due cards".to_string(),
+                started_at: now,
+                completed_at: Some(now),
+                items: vec![ReviewSessionItem {
+                    id: Uuid::new_v4(),
+                    session_id: Uuid::nil(),
+                    card_id: card.id,
+                    question: "What does the ALU do?".to_string(),
+                    rating: Rating::Easy,
+                    response_time_ms: Some(4_000),
+                    cloze_result: Some(ClozeSessionResult {
+                        blanks: vec![crate::model::ClozeBlankResult {
+                            expected: "arithmetic".to_string(),
+                            input: "arithmetik".to_string(),
+                            correct: false,
+                        }],
+                        suggested_rating: Rating::Hard,
+                    }),
+                    answered_at: now,
+                    position: 0,
+                }],
+            })
+            .unwrap();
 
         let backup = storage.export_app_backup(workspace.id).unwrap();
 
@@ -1945,6 +2004,15 @@ mod tests {
         assert_eq!(backup.workspace.name, "Backup");
         assert_eq!(backup.cards.len(), 1);
         assert_eq!(backup.review_events.len(), 1);
+        assert_eq!(backup.review_sessions.len(), 1);
+        assert_eq!(
+            backup.review_sessions[0].items[0]
+                .cloze_result
+                .as_ref()
+                .unwrap()
+                .suggested_rating,
+            Rating::Hard
+        );
         assert_eq!(backup.settings.default_deck, "CPU");
         assert_eq!(backup.doc_pages.len(), 1);
         assert_eq!(backup.doc_pages[0].title, "CPU Docs");
@@ -1992,6 +2060,34 @@ mod tests {
                 next_srs: next,
             })
             .unwrap();
+        source
+            .save_review_session(&ReviewSession {
+                id: Uuid::new_v4(),
+                workspace_id: workspace.id,
+                kind: ReviewSessionKind::Review,
+                scope_label: "All due cards".to_string(),
+                started_at: now,
+                completed_at: Some(now),
+                items: vec![ReviewSessionItem {
+                    id: Uuid::new_v4(),
+                    session_id: Uuid::nil(),
+                    card_id: card.id,
+                    question: "What does the ALU do?".to_string(),
+                    rating: Rating::Good,
+                    response_time_ms: Some(5_000),
+                    cloze_result: Some(ClozeSessionResult {
+                        blanks: vec![crate::model::ClozeBlankResult {
+                            expected: "logical".to_string(),
+                            input: "logical".to_string(),
+                            correct: true,
+                        }],
+                        suggested_rating: Rating::Easy,
+                    }),
+                    answered_at: now,
+                    position: 0,
+                }],
+            })
+            .unwrap();
         let backup = source.export_app_backup(workspace.id).unwrap();
 
         let mut target = StudyGraphStorage::in_memory().unwrap();
@@ -2001,6 +2097,16 @@ mod tests {
         assert_eq!(restored.workspace.name, "Backup");
         assert_eq!(restored.cards.len(), 1);
         assert_eq!(restored.review_events.len(), 1);
+        assert_eq!(restored.review_sessions.len(), 1);
+        assert_eq!(
+            restored.review_sessions[0].items[0]
+                .cloze_result
+                .as_ref()
+                .unwrap()
+                .blanks[0]
+                .input,
+            "logical"
+        );
         assert_eq!(restored.settings.default_deck, "CPU");
         assert_eq!(restored.doc_pages[0].title, "CPU Docs");
     }

@@ -125,8 +125,25 @@ pub struct ReviewSessionItem {
     pub rating: Rating,
     #[serde(default)]
     pub response_time_ms: Option<u32>,
+    #[serde(default)]
+    pub cloze_result: Option<ClozeSessionResult>,
     pub answered_at: DateTime<Utc>,
     pub position: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClozeSessionResult {
+    pub blanks: Vec<ClozeBlankResult>,
+    pub suggested_rating: Rating,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ClozeBlankResult {
+    pub expected: String,
+    pub input: String,
+    pub correct: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

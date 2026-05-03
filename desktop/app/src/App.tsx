@@ -51,6 +51,7 @@ import type {
   BacklinkReference,
   Block,
   CardGeneratorInput,
+  ClozeSessionResult,
   DesktopSnapshot,
   DocBlock,
   DocBlockKind,
@@ -110,6 +111,7 @@ interface SessionAnswerStat {
   question: string;
   rating: Rating;
   responseTimeMs?: number;
+  clozeResult?: ClozeSessionResult;
   answeredAt: string;
 }
 
@@ -120,6 +122,8 @@ interface StoredSessionSummary {
   scopeLabel: string;
   answered: number;
   averageResponseTimeMs?: number;
+  clozeBlankCount?: number;
+  clozeCorrectCount?: number;
   counts: Record<Rating, number>;
 }
 
@@ -441,7 +445,7 @@ export function App() {
     }
   }
 
-  async function rateCurrent(rating: Rating) {
+  async function rateCurrent(rating: Rating, clozeResult?: ClozeSessionResult) {
     const card = dueCards[selectedCardIndex];
     if (!card) {
       return;
@@ -455,6 +459,7 @@ export function App() {
         question: card.question,
         rating,
         responseTimeMs: reviewResponseTimeMs,
+        clozeResult,
         answeredAt: new Date().toISOString(),
       }]);
       setSnapshot(next);
@@ -466,7 +471,7 @@ export function App() {
     }
   }
 
-  async function ratePractice(rating: Rating) {
+  async function ratePractice(rating: Rating, clozeResult?: ClozeSessionResult) {
     const card = practiceQueue[practiceIndex];
     if (!card) {
       return;
@@ -487,6 +492,7 @@ export function App() {
         question: card.question,
         rating,
         responseTimeMs: practiceResponseTimeMs,
+        clozeResult,
         answeredAt: new Date().toISOString(),
       }]);
       setSnapshot(next);
@@ -1305,7 +1311,7 @@ export function App() {
               setReviewResponseTimeMs(undefined);
               setSelectedCardIndex((current) => Math.min(current + 1, Math.max(0, dueCards.length - 1)));
             }}
-            onRate={(rating) => void rateCurrent(rating)}
+            onRate={(rating, clozeResult) => void rateCurrent(rating, clozeResult)}
             onOpenCard={openCardSource}
           />
         )}
@@ -1349,7 +1355,7 @@ export function App() {
               setPracticeResponseTimeMs(undefined);
               setPracticeIndex((current) => Math.min(current + 1, Math.max(0, practiceQueue.length - 1)));
             }}
-            onRate={(rating) => void ratePractice(rating)}
+            onRate={(rating, clozeResult) => void ratePractice(rating, clozeResult)}
             onOpenCard={openCardSource}
           />
         )}
@@ -2655,7 +2661,15 @@ function StudyModeToggle({ mode, onChange }: { mode: StudyMode; onChange: (mode:
   );
 }
 
-function ClozeAnswer({ card, onRate }: { card: StudyCard; onRate?: (rating: Rating) => void }) {
+function ClozeAnswer({
+  card,
+  onRate,
+  onResultChange,
+}: {
+  card: StudyCard;
+  onRate?: (rating: Rating, clozeResult: ClozeSessionResult) => void;
+  onResultChange?: (clozeResult: ClozeSessionResult) => void;
+}) {
   const cloze = useMemo(() => buildClozePrompt(card), [card.id, card.answer_markdown, card.srs.reps, card.srs.ease]);
   const [answers, setAnswers] = useState<string[]>(() => cloze.blanks.map(() => ""));
 
@@ -2664,11 +2678,19 @@ function ClozeAnswer({ card, onRate }: { card: StudyCard; onRate?: (rating: Rati
   }, [cloze.text]);
 
   const evaluation = evaluateClozeAnswers(cloze.blanks, answers);
+  const sessionResult = useMemo(
+    () => clozeEvaluationToResult(cloze.blanks, answers, evaluation.suggestedRating),
+    [answers, cloze.blanks, evaluation.suggestedRating],
+  );
+
+  useEffect(() => {
+    onResultChange?.(sessionResult);
+  }, [onResultChange, sessionResult]);
 
   return (
     <article className="answer-card cloze-card">
       <h3>AI Cloze Answer</h3>
-      <p className="cloze-hint">Fill the blacked-out key words. More words are hidden as the card gets stronger.</p>
+      <p className="cloze-hint">Fill the blacked-out key words. Umlauts, common transliterations, and small typos are tolerated.</p>
       <div className="cloze-text">
         {cloze.parts.map((part, index) => (
           part.kind === "text" ? (
@@ -2690,7 +2712,7 @@ function ClozeAnswer({ card, onRate }: { card: StudyCard; onRate?: (rating: Rati
         <span>Suggested rating: {ratingLabel(evaluation.suggestedRating)}</span>
         <small>{evaluation.message}</small>
         {onRate && evaluation.filledCount === cloze.blanks.length && (
-          <button onClick={() => onRate(evaluation.suggestedRating)}>Apply suggested rating</button>
+          <button onClick={() => onRate(evaluation.suggestedRating, sessionResult)}>Apply suggested rating</button>
         )}
       </div>
       {evaluation.results.some((result) => result.filled && !result.correct) && (
@@ -2717,6 +2739,7 @@ function RecentSessionSummaries({ summaries }: { summaries: StoredSessionSummary
         <span key={summary.id}>
           {summary.kind} · {summary.scopeLabel} · {summary.answered} cards
           {summary.averageResponseTimeMs !== undefined ? ` · Ø ${formatDurationMs(summary.averageResponseTimeMs)}` : ""}
+          {summary.clozeBlankCount ? ` · Cloze ${summary.clozeCorrectCount ?? 0}/${summary.clozeBlankCount}` : ""}
         </span>
       ))}
     </aside>
@@ -2742,6 +2765,14 @@ function SessionStatsPanel({
   const slowest = [...timedStats]
     .sort((left, right) => (right.responseTimeMs ?? 0) - (left.responseTimeMs ?? 0))
     .slice(0, 3);
+  const clozeStats = stats
+    .map((stat) => stat.clozeResult)
+    .filter((result): result is ClozeSessionResult => Boolean(result));
+  const clozeBlankCount = clozeStats.reduce((sum, result) => sum + result.blanks.length, 0);
+  const clozeCorrectCount = clozeStats.reduce(
+    (sum, result) => sum + result.blanks.filter((blank) => blank.correct).length,
+    0,
+  );
 
   if (answered === 0 && currentResponseTimeMs === undefined) {
     return null;
@@ -2753,6 +2784,7 @@ function SessionStatsPanel({
       {currentResponseTimeMs !== undefined && <span>Current answer time: {formatDurationMs(currentResponseTimeMs)}</span>}
       {averageMs !== undefined && <span>Ø answer time: {formatDurationMs(averageMs)}</span>}
       <span>Again {counts.again} · Hard {counts.hard} · Good {counts.good} · Easy {counts.easy}</span>
+      {clozeBlankCount > 0 && <span>Cloze: {clozeCorrectCount}/{clozeBlankCount} blanks correct</span>}
       {slowest.length > 0 && (
         <span>Slowest: {slowest.map((stat) => `${shorten(stat.question, 28)} (${formatDurationMs(stat.responseTimeMs ?? 0)})`).join(" · ")}</span>
       )}
@@ -2788,11 +2820,17 @@ function ReviewView({
   recentSummaries: StoredSessionSummary[];
   onShowAnswer: () => void;
   onSkip: () => void;
-  onRate: (rating: Rating) => void;
+  onRate: (rating: Rating, clozeResult?: ClozeSessionResult) => void;
   onOpenCard: (card: StudyCard) => void;
 }) {
   const reviewRef = useRef<HTMLElement | null>(null);
+  const [latestClozeResult, setLatestClozeResult] = useState<ClozeSessionResult | undefined>();
   const progress = total > 0 ? Math.round(((index + 1) / total) * 100) : 0;
+  const ratingClozeResult = studyMode === "cloze" ? latestClozeResult : undefined;
+
+  useEffect(() => {
+    setLatestClozeResult(undefined);
+  }, [card?.id, showAnswer, studyMode]);
 
   useEffect(() => {
     window.setTimeout(() => reviewRef.current?.focus(), 0);
@@ -2833,7 +2871,7 @@ function ReviewView({
           const rating = ratingByKey[event.key];
           if (rating) {
             event.preventDefault();
-            onRate(rating);
+            onRate(rating, ratingClozeResult);
           }
         }
       }}
@@ -2854,7 +2892,7 @@ function ReviewView({
       </article>
       {showAnswer && (
         studyMode === "cloze" ? (
-          <ClozeAnswer card={card} onRate={onRate} />
+          <ClozeAnswer card={card} onRate={onRate} onResultChange={setLatestClozeResult} />
         ) : (
           <article className="answer-card">
             <h3>Answer</h3>
@@ -2871,10 +2909,10 @@ function ReviewView({
           </>
         ) : (
           <>
-            <button className="danger" onClick={() => onRate("again")}>Again</button>
-            <button className="warning" onClick={() => onRate("hard")}>Hard</button>
-            <button className="primary" onClick={() => onRate("good")}>Good</button>
-            <button className="success" onClick={() => onRate("easy")}>Easy</button>
+            <button className="danger" onClick={() => onRate("again", ratingClozeResult)}>Again</button>
+            <button className="warning" onClick={() => onRate("hard", ratingClozeResult)}>Hard</button>
+            <button className="primary" onClick={() => onRate("good", ratingClozeResult)}>Good</button>
+            <button className="success" onClick={() => onRate("easy", ratingClozeResult)}>Easy</button>
             <button onClick={() => onOpenCard(card)}>Edit Card</button>
           </>
         )}
@@ -2927,10 +2965,12 @@ function FreePracticeView({
   onRecordRatingsChange: (value: boolean) => void;
   onShowAnswer: () => void;
   onSkip: () => void;
-  onRate: (rating: Rating) => void;
+  onRate: (rating: Rating, clozeResult?: ClozeSessionResult) => void;
   onOpenCard: (card: StudyCard) => void;
 }) {
   const practiceRef = useRef<HTMLElement | null>(null);
+  const [latestClozeResult, setLatestClozeResult] = useState<ClozeSessionResult | undefined>();
+  const ratingClozeResult = studyMode === "cloze" ? latestClozeResult : undefined;
   const selectedDeckLabel =
     mode === "graph"
       ? `Graph: ${graphNodeLabel || "selected node"}`
@@ -2938,6 +2978,10 @@ function FreePracticeView({
         ? "All decks"
         : decks.find((deck) => deck.deck_slug === deckSlug)?.deck ?? "All decks";
   const progress = total > 0 ? Math.round(((index + 1) / total) * 100) : 0;
+
+  useEffect(() => {
+    setLatestClozeResult(undefined);
+  }, [card?.id, showAnswer, studyMode]);
 
   useEffect(() => {
     window.setTimeout(() => practiceRef.current?.focus(), 0);
@@ -2970,7 +3014,7 @@ function FreePracticeView({
           const rating = ratingByKey[event.key];
           if (rating) {
             event.preventDefault();
-            onRate(rating);
+            onRate(rating, ratingClozeResult);
           }
         }
       }}
@@ -3033,7 +3077,7 @@ function FreePracticeView({
           </article>
           {showAnswer && (
             studyMode === "cloze" ? (
-              <ClozeAnswer card={card} onRate={onRate} />
+              <ClozeAnswer card={card} onRate={onRate} onResultChange={setLatestClozeResult} />
             ) : (
               <article className="answer-card">
                 <h3>Answer</h3>
@@ -3050,10 +3094,10 @@ function FreePracticeView({
               </>
             ) : (
               <>
-                <button className="danger" onClick={() => onRate("again")}>Again</button>
-                <button className="warning" onClick={() => onRate("hard")}>Hard</button>
-                <button className="primary" onClick={() => onRate("good")}>Good</button>
-                <button className="success" onClick={() => onRate("easy")}>Easy</button>
+                <button className="danger" onClick={() => onRate("again", ratingClozeResult)}>Again</button>
+                <button className="warning" onClick={() => onRate("hard", ratingClozeResult)}>Hard</button>
+                <button className="primary" onClick={() => onRate("good", ratingClozeResult)}>Good</button>
+                <button className="success" onClick={() => onRate("easy", ratingClozeResult)}>Easy</button>
                 <button onClick={() => onOpenCard(card)}>Edit Card</button>
                 <button onClick={onSkip}>Skip</button>
               </>
@@ -3672,6 +3716,7 @@ function ExportView({
             <span>Pages: {backup.workspace.pages.length}</span>
             <span>Cards: {backup.cards.length}</span>
             <span>Reviews: {backup.reviewEvents.length}</span>
+            <span>Sessions: {backup.reviewSessions.length}</span>
             <span>Doc pages: {backup.docPages.length}</span>
             <span>Schema: {backup.schemaVersion}</span>
           </div>
@@ -3994,6 +4039,7 @@ function buildReviewSession(
       question: stat.question,
       rating: stat.rating,
       responseTimeMs: stat.responseTimeMs,
+      clozeResult: stat.clozeResult,
       answeredAt: stat.answeredAt,
       position,
     })),
@@ -4002,6 +4048,14 @@ function buildReviewSession(
 
 function reviewSessionToStoredSummary(session: ReviewSession): StoredSessionSummary {
   const timed = session.items.filter((item) => typeof item.responseTimeMs === "number");
+  const clozeResults = session.items
+    .map((item) => item.clozeResult)
+    .filter((result): result is ClozeSessionResult => Boolean(result));
+  const clozeBlankCount = clozeResults.reduce((sum, result) => sum + result.blanks.length, 0);
+  const clozeCorrectCount = clozeResults.reduce(
+    (sum, result) => sum + result.blanks.filter((blank) => blank.correct).length,
+    0,
+  );
   return {
     id: session.id,
     kind: session.kind,
@@ -4011,6 +4065,8 @@ function reviewSessionToStoredSummary(session: ReviewSession): StoredSessionSumm
     averageResponseTimeMs: timed.length > 0
       ? timed.reduce((sum, item) => sum + (item.responseTimeMs ?? 0), 0) / timed.length
       : undefined,
+    clozeBlankCount: clozeBlankCount > 0 ? clozeBlankCount : undefined,
+    clozeCorrectCount: clozeBlankCount > 0 ? clozeCorrectCount : undefined,
     counts: session.items.reduce<Record<Rating, number>>((acc, item) => {
       acc[item.rating] += 1;
       return acc;
@@ -4032,9 +4088,12 @@ function randomUuid() {
 function evaluateClozeAnswers(blanks: string[], answers: string[]) {
   const results = blanks.map((blank, index) => {
     const answer = answers[index] ?? "";
+    const filled = answer.trim().length > 0;
+    const match = filled ? clozeAnswerMatches(answer, blank) : { correct: false, kind: "empty" as const };
     return {
-      filled: answer.trim().length > 0,
-      correct: normalizeAnswer(answer) === normalizeAnswer(blank),
+      filled,
+      correct: match.correct,
+      matchKind: match.kind,
     };
   });
   const filledCount = results.filter((result) => result.filled).length;
@@ -4059,6 +4118,17 @@ function evaluateClozeAnswers(blanks: string[], answers: string[]) {
           ? "Partial recall. Hard is appropriate."
           : "Too many misses. Again is appropriate.";
   return { results, filledCount, correctCount, suggestedRating, message };
+}
+
+function clozeEvaluationToResult(blanks: string[], answers: string[], suggestedRating: Rating): ClozeSessionResult {
+  return {
+    suggestedRating,
+    blanks: blanks.map((blank, index) => ({
+      expected: blank,
+      input: answers[index] ?? "",
+      correct: clozeAnswerMatches(answers[index] ?? "", blank).correct,
+    })),
+  };
 }
 
 function ratingLabel(rating: Rating) {
@@ -4107,8 +4177,74 @@ function clozeWordScore(word: string, fullText: string, card: StudyCard) {
   return score;
 }
 
+function clozeAnswerMatches(input: string, expected: string): { correct: boolean; kind: "empty" | "exact" | "variant" | "typo" | "miss" } {
+  const normalizedInput = normalizeAnswer(input);
+  if (!normalizedInput) return { correct: false, kind: "empty" };
+  const expectedVariants = answerVariants(expected);
+  if (expectedVariants.has(normalizedInput)) return { correct: true, kind: "exact" };
+
+  const inputVariants = answerVariants(input);
+  for (const variant of inputVariants) {
+    if (expectedVariants.has(variant)) return { correct: true, kind: "variant" };
+  }
+
+  const bestDistance = Math.min(
+    ...Array.from(expectedVariants).map((variant) => levenshteinDistance(normalizedInput, variant)),
+  );
+  const typoAllowance = normalizedInput.length >= 9 ? 2 : normalizedInput.length >= 5 ? 1 : 0;
+  if (typoAllowance > 0 && bestDistance <= typoAllowance) {
+    return { correct: true, kind: "typo" };
+  }
+
+  return { correct: false, kind: "miss" };
+}
+
+function answerVariants(value: string) {
+  const compact = normalizeAnswer(value);
+  const transliterated = normalizeAnswer(transliterateUmlauts(value));
+  const withoutArticles = compact.replace(/^(der|die|das|ein|eine|the|a|an) /, "");
+  return new Set([compact, transliterated, withoutArticles].filter(Boolean));
+}
+
 function normalizeAnswer(value: string) {
-  return value.trim().toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "");
+  return value
+    .trim()
+    .toLowerCase()
+    .normalize("NFKD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .replace(/[’']/g, "")
+    .replace(/[^\p{L}\p{N}]+/gu, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function transliterateUmlauts(value: string) {
+  return value
+    .replace(/[äæ]/gi, (match) => match === match.toUpperCase() ? "Ae" : "ae")
+    .replace(/[öőø]/gi, (match) => match === match.toUpperCase() ? "Oe" : "oe")
+    .replace(/[üű]/gi, (match) => match === match.toUpperCase() ? "Ue" : "ue")
+    .replace(/[ß]/g, "ss");
+}
+
+function levenshteinDistance(left: string, right: string) {
+  if (left === right) return 0;
+  if (left.length === 0) return right.length;
+  if (right.length === 0) return left.length;
+  const previous = Array.from({ length: right.length + 1 }, (_, index) => index);
+  const current = Array.from({ length: right.length + 1 }, () => 0);
+  for (let leftIndex = 1; leftIndex <= left.length; leftIndex += 1) {
+    current[0] = leftIndex;
+    for (let rightIndex = 1; rightIndex <= right.length; rightIndex += 1) {
+      const substitutionCost = left[leftIndex - 1] === right[rightIndex - 1] ? 0 : 1;
+      current[rightIndex] = Math.min(
+        current[rightIndex - 1] + 1,
+        previous[rightIndex] + 1,
+        previous[rightIndex - 1] + substitutionCost,
+      );
+    }
+    previous.splice(0, previous.length, ...current);
+  }
+  return previous[right.length];
 }
 
 const commonClozeWords = new Set(["this", "that", "with", "from", "have", "will", "eine", "einer", "einen", "einem", "oder", "aber", "auch", "dass", "nicht", "werden", "kann", "sind", "the", "and", "for", "into"]);

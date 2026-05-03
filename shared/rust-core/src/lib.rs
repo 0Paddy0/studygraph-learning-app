@@ -12,9 +12,9 @@ pub use backlinks::{build_backlinks, BacklinkReference};
 pub use graph::{build_study_graph, StudyGraphData, StudyGraphEdge, StudyGraphNode};
 pub use import_export::{export_page_to_logseq_markdown, import_single_markdown_page};
 pub use model::{
-    AppBackup, AppSettings, Block, CardId, DocBlock, DocBlockKind, DocPage, Page, Rating,
-    ReviewEvent, ReviewSession, ReviewSessionItem, ReviewSessionKind, SrsState, StudyCard,
-    Workspace,
+    AppBackup, AppSettings, Block, CardId, ClozeBlankResult, ClozeSessionResult, DocBlock,
+    DocBlockKind, DocPage, Page, Rating, ReviewEvent, ReviewSession, ReviewSessionItem,
+    ReviewSessionKind, SrsState, StudyCard, Workspace,
 };
 pub use normalize::{
     normalize_deck_name, normalize_display_name, normalize_slug, normalize_topic_name,
